@@ -1,0 +1,220 @@
+{
+  "name": "Customer Sales Report - Teams",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "customer-report",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0001-4000-8000-000000000001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "webhookId": "customer-report-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── CONFIGURAÇÃO ──────────────────────────────────────────\n// Ajuste o caminho base onde seus arquivos .md estão salvos\nconst BASE_PATH = '/data/relatorios-clientes';\n// Extensão dos arquivos (mude para '.MD' se necessário)\nconst FILE_EXT = '.md';\n// ──────────────────────────────────────────────────────────\n\nconst body = $input.first().json.body ?? $input.first().json;\nconst customerId = body?.customerId;\n\nif (!customerId) {\n  throw new Error('INVALID_INPUT: customerId é obrigatório no body da requisição');\n}\n\n// Sanitiza o ID: permite apenas letras, números, underscore e hífen\nconst sanitized = String(customerId).replace(/[^a-zA-Z0-9_-]/g, '');\n\nif (!sanitized || sanitized.length === 0) {\n  throw new Error('INVALID_INPUT: customerId contém apenas caracteres inválidos');\n}\n\nif (sanitized.length > 100) {\n  throw new Error('INVALID_INPUT: customerId muito longo (máximo 100 caracteres)');\n}\n\nreturn [{\n  json: {\n    customerId: sanitized,\n    filePath: `${BASE_PATH}/${sanitized}${FILE_EXT}`,\n    requestedAt: new Date().toISOString(),\n    teamId: body?.teamId ?? null,\n    channelId: body?.channelId ?? null\n  }\n}];"
+      },
+      "id": "a1b2c3d4-0002-4000-8000-000000000002",
+      "name": "Validar e Construir Caminho",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "fileSelector": "={{ $json.filePath }}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0003-4000-8000-000000000003",
+      "name": "Ler Arquivo do Cliente",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const fileItem = $input.first();\nconst meta = $('Validar e Construir Caminho').first().json;\n\n// Decodifica o conteúdo binário do arquivo\nconst binaryKey = Object.keys(fileItem.binary ?? {})[0];\nif (!binaryKey) {\n  throw new Error('FILE_READ_ERROR: Nenhum conteúdo encontrado no arquivo');\n}\n\nconst rawContent = Buffer.from(fileItem.binary[binaryKey].data, 'base64').toString('utf-8');\n\n// Limite do Teams para mensagens de texto: ~28.000 caracteres\nconst MAX_CHARS = 25000;\nconst isTruncated = rawContent.length > MAX_CHARS;\nconst content = isTruncated ? rawContent.substring(0, MAX_CHARS) : rawContent;\n\n// Converte Markdown básico em HTML compatível com Teams\nfunction mdToTeamsHtml(md) {\n  return md\n    // Títulos\n    .replace(/^#### (.+)$/gm, '<h4>$1</h4>')\n    .replace(/^### (.+)$/gm, '<h3>$1</h3>')\n    .replace(/^## (.+)$/gm, '<h2>$1</h2>')\n    .replace(/^# (.+)$/gm, '<h1>$1</h1>')\n    // Negrito e itálico\n    .replace(/\\*\\*\\*(.+?)\\*\\*\\*/g, '<strong><em>$1</em></strong>')\n    .replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>')\n    .replace(/\\*(.+?)\\*/g, '<em>$1</em>')\n    // Código inline\n    .replace(/`(.+?)`/g, '<code>$1</code>')\n    // Listas\n    .replace(/^[-*] (.+)$/gm, '&nbsp;&nbsp;• $1')\n    .replace(/^\\d+\\. (.+)$/gm, (m, p1, offset, str) => {\n      const num = m.match(/^(\\d+)/)[1];\n      return `&nbsp;&nbsp;${num}. ${p1}`;\n    })\n    // Separadores\n    .replace(/^---+$/gm, '<hr/>')\n    // Quebras de linha\n    .replace(/\\n/g, '<br/>');\n}\n\nconst htmlContent = mdToTeamsHtml(content);\n\n// Formata timestamp para horário de Brasília (UTC-3)\nconst now = new Date();\nconst brTime = now.toLocaleString('pt-BR', {\n  timeZone: 'America/Sao_Paulo',\n  day: '2-digit', month: '2-digit', year: 'numeric',\n  hour: '2-digit', minute: '2-digit'\n});\n\nconst warningBanner = isTruncated\n  ? '<br/><br/><strong>⚠️ Relatório truncado</strong> — O arquivo completo excede o limite do Teams. Acesse o arquivo original para mais detalhes.<br/>'\n  : '';\n\nconst fullMessage = [\n  `<h2>📊 Relatório de Vendas — Cliente ${meta.customerId}</h2>`,\n  '<hr/>',\n  htmlContent,\n  warningBanner,\n  '<hr/>',\n  `<small>🕐 Gerado em: ${brTime} | Arquivo: ${meta.filePath}</small>`\n].join('');\n\nreturn [{\n  json: {\n    customerId: meta.customerId,\n    teamId: meta.teamId,\n    channelId: meta.channelId,\n    message: fullMessage,\n    charCount: rawContent.length,\n    isTruncated,\n    requestedAt: meta.requestedAt\n  }\n}];"
+      },
+      "id": "a1b2c3d4-0004-4000-8000-000000000004",
+      "name": "Formatar Relatório",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [860, 300]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "team": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $json.teamId ?? 'SEU_TEAM_ID_AQUI' }}"
+        },
+        "channel": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $json.channelId ?? 'SEU_CHANNEL_ID_AQUI' }}"
+        },
+        "messageType": "text",
+        "message": "={{ $json.message }}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0005-4000-8000-000000000005",
+      "name": "Enviar Relatório no Teams",
+      "type": "n8n-nodes-base.microsoftTeams",
+      "typeVersion": 2,
+      "position": [1080, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'success', customerId: $('Formatar Relatório').first().json.customerId, charCount: $('Formatar Relatório').first().json.charCount, isTruncated: $('Formatar Relatório').first().json.isTruncated }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "a1b2c3d4-0006-4000-8000-000000000006",
+      "name": "Responder ao Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1300, 300]
+    },
+    {
+      "parameters": {},
+      "id": "a1b2c3d4-0007-4000-8000-000000000007",
+      "name": "Capturar Erros",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [200, 520]
+    },
+    {
+      "parameters": {
+        "jsCode": "const error = $input.first().json;\nconst errorMsg = error.error?.message ?? 'Erro desconhecido';\n\nlet userMessage = '';\nlet statusCode = 500;\n\nif (errorMsg.includes('INVALID_INPUT')) {\n  const detail = errorMsg.replace('INVALID_INPUT: ', '');\n  userMessage = `<strong>❌ Requisição inválida</strong><br/>${detail}`;\n  statusCode = 400;\n} else if (errorMsg.includes('ENOENT') || errorMsg.includes('no such file')) {\n  // Extrai o customer ID do caminho do erro\n  const pathMatch = errorMsg.match(/\\/([^\\/]+)\\.md/);\n  const clientId = pathMatch ? pathMatch[1] : 'desconhecido';\n  userMessage = `<strong>🔍 Cliente não encontrado</strong><br/>Nenhum relatório localizado para o ID: <code>${clientId}</code><br/><br/>Verifique se o ID está correto e se o arquivo existe.`;\n  statusCode = 404;\n} else {\n  userMessage = `<strong>⚠️ Erro interno</strong><br/>Não foi possível processar o relatório.<br/><br/><code>${errorMsg}</code>`;\n}\n\nreturn [{\n  json: {\n    teamsMessage: userMessage,\n    statusCode,\n    originalError: errorMsg\n  }\n}];"
+      },
+      "id": "a1b2c3d4-0008-4000-8000-000000000008",
+      "name": "Classificar Erro",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 520]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "team": {
+          "__rl": true,
+          "mode": "id",
+          "value": "SEU_TEAM_ID_AQUI"
+        },
+        "channel": {
+          "__rl": true,
+          "mode": "id",
+          "value": "SEU_CHANNEL_ID_AQUI"
+        },
+        "messageType": "text",
+        "message": "={{ $json.teamsMessage }}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0009-4000-8000-000000000009",
+      "name": "Notificar Erro no Teams",
+      "type": "n8n-nodes-base.microsoftTeams",
+      "typeVersion": 2,
+      "position": [640, 520]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validar e Construir Caminho",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar e Construir Caminho": {
+      "main": [
+        [
+          {
+            "node": "Ler Arquivo do Cliente",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ler Arquivo do Cliente": {
+      "main": [
+        [
+          {
+            "node": "Formatar Relatório",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Formatar Relatório": {
+      "main": [
+        [
+          {
+            "node": "Enviar Relatório no Teams",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviar Relatório no Teams": {
+      "main": [
+        [
+          {
+            "node": "Responder ao Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Capturar Erros": {
+      "main": [
+        [
+          {
+            "node": "Classificar Erro",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classificar Erro": {
+      "main": [
+        [
+          {
+            "node": "Notificar Erro no Teams",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2026-04-29T00:00:00.000Z",
+  "versionId": "1"
+}
