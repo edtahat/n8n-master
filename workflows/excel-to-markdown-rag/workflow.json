@@ -1,0 +1,469 @@
+{
+  "name": "Excel → Markdown RAG (SharePoint + OpenAI)",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Excel → Agente RAG",
+        "formDescription": "Gera uma base de conhecimento em Markdown (capítulos, sumário de busca, system prompt) a partir de um Excel do SharePoint. Informe o caminho do arquivo dentro da biblioteca \"Documentos\" do site.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Caminho do arquivo Excel",
+              "fieldType": "text",
+              "placeholder": "ex.: General/dados/vendas.xlsx",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Contexto do agente (opcional)",
+              "fieldType": "textarea",
+              "placeholder": "ex.: agente para responder dúvidas do time comercial sobre a carteira de clientes"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.3,
+      "position": [
+        0,
+        0
+      ],
+      "id": "8359bf37-baf6-4544-b135-066e26dc8c25",
+      "name": "On form submission",
+      "webhookId": "dee86dd9-955b-4090-b327-dc9b7de7291b"
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "{\n  \"sharePointHost\": \"https://SEUTENANT.sharepoint.com\"\n}",
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        0
+      ],
+      "id": "d2de3c88-34df-457d-8bba-9bc94bd01c04",
+      "name": "Config"
+    },
+    {
+      "parameters": {
+        "resource": "file",
+        "operation": "download",
+        "site": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "folder": {
+          "__rl": true,
+          "mode": "id",
+          "value": "root"
+        },
+        "file": {
+          "__rl": true,
+          "mode": "id",
+          "value": "=root:/{{ $('On form submission').first().json['Caminho do arquivo Excel'].replace(/^\\/+|\\/+$/g, '') }}:"
+        },
+        "requestOptions": {}
+      },
+      "type": "n8n-nodes-base.microsoftSharePoint",
+      "typeVersion": 1,
+      "position": [
+        440,
+        0
+      ],
+      "id": "957571f2-54d2-40b8-b253-2090136c99c0",
+      "name": "Download Excel from SharePoint"
+    },
+    {
+      "parameters": {
+        "operation": "xlsx",
+        "binaryPropertyName": "data",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        0
+      ],
+      "id": "323308e5-5758-44d7-8477-9ee2fe57283b",
+      "name": "Extract Rows"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Perfil determinístico das colunas — nenhuma IA envolvida.\n// Saída: 1 item com estatísticas por coluna, candidatas a agrupamento e outliers (IQR).\nconst IQR_FACTOR = 1.5;\nconst LOW_CARDINALITY_MAX = 30;\nconst TOP_VALUES = 20;\n\nconst items = $input.all();\nif (!items.length) {\n\tthrow new Error(\n\t\t'Nenhuma linha encontrada na planilha. Verifique se o arquivo Excel tem dados e cabeçalho na primeira linha.',\n\t);\n}\nconst rows = items.map((item) => item.json);\n\nconst colNames = [];\nfor (const row of rows) {\n\tfor (const key of Object.keys(row)) {\n\t\tif (!colNames.includes(key)) colNames.push(key);\n\t}\n}\nif (!colNames.length) {\n\tthrow new Error('Nenhuma coluna encontrada na planilha.');\n}\n\nfunction parseNumber(value) {\n\tif (typeof value === 'number') return Number.isFinite(value) ? value : null;\n\tif (typeof value === 'string') {\n\t\tconst trimmed = value.trim();\n\t\tif (!/^-?\\d+(?:[.,]\\d+)?$/.test(trimmed)) return null;\n\t\treturn Number(trimmed.replace(',', '.'));\n\t}\n\treturn null;\n}\n\nfunction quantile(sorted, q) {\n\tif (!sorted.length) return null;\n\tconst pos = (sorted.length - 1) * q;\n\tconst base = Math.floor(pos);\n\tconst rest = pos - base;\n\tif (sorted[base + 1] !== undefined) return sorted[base] + rest * (sorted[base + 1] - sorted[base]);\n\treturn sorted[base];\n}\n\nfunction round4(n) {\n\treturn typeof n === 'number' ? Math.round(n * 10000) / 10000 : n;\n}\n\nconst columns = colNames.map((name) => {\n\tconst rawValues = rows.map((r) => r[name]);\n\tconst nonNull = rawValues.filter((v) => v !== null && v !== undefined && String(v).trim() !== '');\n\tconst nullCount = rawValues.length - nonNull.length;\n\n\tconst counts = new Map();\n\tfor (const v of nonNull) {\n\t\tconst key = String(v);\n\t\tcounts.set(key, (counts.get(key) || 0) + 1);\n\t}\n\tconst uniqueCount = counts.size;\n\tconst topValues = [...counts.entries()]\n\t\t.sort((a, b) => b[1] - a[1])\n\t\t.slice(0, TOP_VALUES)\n\t\t.map(([value, count]) => ({ value, count }));\n\n\tconst numericPairs = [];\n\tfor (let i = 0; i < rows.length; i++) {\n\t\tconst n = parseNumber(rows[i][name]);\n\t\tif (n !== null) numericPairs.push({ value: n, rowIndex: i });\n\t}\n\tconst isNumeric = nonNull.length > 0 && numericPairs.length >= nonNull.length * 0.9;\n\n\tlet stats = null;\n\tlet outliers = null;\n\tif (isNumeric && numericPairs.length) {\n\t\tconst sorted = numericPairs.map((p) => p.value).sort((a, b) => a - b);\n\t\tlet sum = 0;\n\t\tfor (const v of sorted) sum += v;\n\t\tconst mean = sum / sorted.length;\n\t\tlet varSum = 0;\n\t\tfor (const v of sorted) varSum += (v - mean) * (v - mean);\n\t\tconst q1 = quantile(sorted, 0.25);\n\t\tconst q3 = quantile(sorted, 0.75);\n\t\tconst iqr = q3 - q1;\n\t\tconst lowerBound = q1 - IQR_FACTOR * iqr;\n\t\tconst upperBound = q3 + IQR_FACTOR * iqr;\n\t\tconst outlierPairs = numericPairs.filter((p) => p.value < lowerBound || p.value > upperBound);\n\t\tstats = {\n\t\t\tmin: sorted[0],\n\t\t\tmax: sorted[sorted.length - 1],\n\t\t\tmean: round4(mean),\n\t\t\tmedian: round4(quantile(sorted, 0.5)),\n\t\t\tq1: round4(q1),\n\t\t\tq3: round4(q3),\n\t\t\tstd: round4(Math.sqrt(varSum / sorted.length)),\n\t\t};\n\t\toutliers = {\n\t\t\tlowerBound: round4(lowerBound),\n\t\t\tupperBound: round4(upperBound),\n\t\t\tcount: outlierPairs.length,\n\t\t\tsamples: outlierPairs.slice(0, 10).map((p) => ({ value: p.value, excelRow: p.rowIndex + 2 })),\n\t\t};\n\t}\n\n\treturn {\n\t\tname,\n\t\ttype: isNumeric ? 'number' : 'string',\n\t\tnullCount,\n\t\tuniqueCount,\n\t\tlowCardinality: uniqueCount >= 2 && uniqueCount <= LOW_CARDINALITY_MAX,\n\t\ttopValues,\n\t\tstats,\n\t\toutliers,\n\t};\n});\n\nconst candidateGroupBys = columns.filter((c) => c.lowCardinality).map((c) => c.name);\n\nreturn [\n\t{\n\t\tjson: {\n\t\t\trowCount: rows.length,\n\t\t\tcolumnCount: columns.length,\n\t\t\tcolumns,\n\t\t\tcandidateGroupBys,\n\t\t\tsampleRows: rows.slice(0, 5),\n\t\t\tiqrFactor: IQR_FACTOR,\n\t\t},\n\t},\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ],
+      "id": "d48d649b-99c4-4bcf-95a8-13966c6d2cdd",
+      "name": "Profile Columns"
+    },
+    {
+      "parameters": {
+        "text": "=Analise o perfil estatístico da planilha abaixo e proponha capítulos temáticos para uma base de conhecimento em Markdown que alimentará um agente de IA.\n\nCONTEXTO INFORMADO PELO USUÁRIO:\n{{ $('On form submission').first().json['Contexto do agente (opcional)'] || 'nenhum' }}\n\nPERFIL DAS COLUNAS (estatísticas apenas, sem dados brutos):\n{{ JSON.stringify($json) }}",
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"dataset_summary\": {\n      \"type\": \"string\",\n      \"description\": \"Resumo em 2-4 frases do que a planilha contém\"\n    },\n    \"columns\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"name\": {\n            \"type\": \"string\",\n            \"description\": \"Nome exato da coluna na planilha\"\n          },\n          \"meaning\": {\n            \"type\": \"string\",\n            \"description\": \"Significado provável da coluna\"\n          },\n          \"role\": {\n            \"type\": \"string\",\n            \"enum\": [\n              \"dimension\",\n              \"metric\",\n              \"identifier\",\n              \"date\",\n              \"other\"\n            ]\n          }\n        },\n        \"required\": [\n          \"name\",\n          \"meaning\",\n          \"role\"\n        ]\n      }\n    },\n    \"suggested_chapters\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"id\": {\n            \"type\": \"string\",\n            \"description\": \"Slug curto em minúsculas, sem espaços\"\n          },\n          \"title\": {\n            \"type\": \"string\"\n          },\n          \"description\": {\n            \"type\": \"string\"\n          },\n          \"group_by_column\": {\n            \"type\": \"string\",\n            \"description\": \"Deve ser uma coluna listada em candidateGroupBys\"\n          },\n          \"columns_covered\": {\n            \"type\": \"array\",\n            \"items\": {\n              \"type\": \"string\"\n            }\n          }\n        },\n        \"required\": [\n          \"id\",\n          \"title\",\n          \"description\",\n          \"group_by_column\"\n        ]\n      }\n    },\n    \"outlier_notes\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"string\"\n      }\n    }\n  },\n  \"required\": [\n    \"dataset_summary\",\n    \"columns\",\n    \"suggested_chapters\"\n  ]\n}",
+        "options": {
+          "systemPromptTemplate": "Você é um analista de dados especialista em estruturar bases de conhecimento para agentes de IA (RAG).\n\nVocê receberá o PERFIL ESTATÍSTICO de uma planilha (nunca os dados completos). Sua tarefa:\n1. Explicar o que o dataset aparenta conter (dataset_summary).\n2. Interpretar cada coluna (columns): significado provável e papel (dimension/metric/identifier/date/other).\n3. Propor de 4 a 8 capítulos temáticos (suggested_chapters) para dividir a base de conhecimento. Cada capítulo é uma visão dos dados agrupada por UMA coluna.\n4. Registrar observações sobre os outliers detectados (outlier_notes).\n\nREGRAS OBRIGATÓRIAS:\n- group_by_column DEVE ser uma coluna listada em candidateGroupBys do perfil. Nunca invente nomes de colunas.\n- id deve ser um slug curto em minúsculas, sem espaços nem acentos (ex.: \"regiao\", \"produto\").\n- columns_covered deve conter apenas nomes de colunas que existem no perfil; escolha as mais relevantes para o tema do capítulo.\n- Não invente valores de dados: baseie-se apenas nas estatísticas fornecidas.\n- Responda no mesmo idioma dos nomes das colunas (provavelmente português)."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1.2,
+      "position": [
+        1100,
+        0
+      ],
+      "id": "394b3d82-a2cf-4cd9-b762-7a30f70048a6",
+      "name": "Suggest Chapters"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-4.1",
+          "cachedResultName": "gpt-4.1"
+        },
+        "options": {
+          "temperature": 0
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        1210,
+        220
+      ],
+      "id": "575c7843-ae0f-47fd-9bcd-86b286c36264",
+      "name": "OpenAI Chat Model"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Valida as sugestões da IA contra as colunas reais (anti-alucinação)\n// e monta os campos do formulário de seleção de capítulos.\nconst aiOutput = $input.first().json.output || {};\nconst profile = $('Profile Columns').first().json;\nconst validColumns = new Set((profile.columns || []).map((c) => c.name));\n\nfunction slugify(text) {\n\treturn (\n\t\tString(text)\n\t\t\t.normalize('NFD')\n\t\t\t.replace(/[\\u0300-\\u036f]/g, '')\n\t\t\t.toLowerCase()\n\t\t\t.replace(/[^a-z0-9]+/g, '-')\n\t\t\t.replace(/^-+|-+$/g, '')\n\t\t\t.slice(0, 40) || 'capitulo'\n\t);\n}\n\nconst seen = new Set();\nconst chapters = [];\nfor (const raw of aiOutput.suggested_chapters || []) {\n\tif (!raw || !raw.title || !raw.group_by_column) continue;\n\tif (!validColumns.has(raw.group_by_column)) continue;\n\tconst id = slugify(raw.id || raw.title);\n\tif (!id || id === 'outliers' || seen.has(id)) continue;\n\tseen.add(id);\n\tchapters.push({\n\t\tid,\n\t\ttitle: String(raw.title),\n\t\tdescription: String(raw.description || ''),\n\t\tgroup_by_column: raw.group_by_column,\n\t\tcolumns_covered: (raw.columns_covered || []).filter((c) => validColumns.has(c)),\n\t});\n}\n\nif (!chapters.length) {\n\tthrow new Error(\n\t\t'A IA não sugeriu nenhum capítulo válido (todas as sugestões referenciavam colunas inexistentes). Reexecute o workflow ou revise a planilha.',\n\t);\n}\n\nconst options = chapters.map((c) => ({\n\toption: c.id + ' — ' + c.title + ' (agrupado por ' + c.group_by_column + ')',\n}));\noptions.push({ option: 'outliers — Outliers e anomalias (IQR)' });\n\nconst formFields = [\n\t{\n\t\tfieldLabel: 'Capítulos',\n\t\tfieldType: 'checkbox',\n\t\trequiredField: true,\n\t\tfieldOptions: { values: options },\n\t},\n\t{ fieldLabel: 'Instruções adicionais (opcional)', fieldType: 'textarea' },\n];\n\nreturn [\n\t{\n\t\tjson: {\n\t\t\tformFieldsJson: JSON.stringify(formFields),\n\t\t\tplan: { ...aiOutput, suggested_chapters: chapters },\n\t\t},\n\t},\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        0
+      ],
+      "id": "8669874b-65d9-4f1b-8488-e72612932687",
+      "name": "Prepare Chapter Form"
+    },
+    {
+      "parameters": {
+        "operation": "page",
+        "defineForm": "json",
+        "jsonOutput": "={{ $json.formFieldsJson }}",
+        "limitWaitTime": false,
+        "options": {
+          "formTitle": "Selecione os capítulos do agente",
+          "formDescription": "A IA analisou a planilha e sugeriu os capítulos abaixo. Marque os que o agente deve cobrir.",
+          "buttonLabel": "Gerar arquivos"
+        }
+      },
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.3,
+      "position": [
+        1540,
+        0
+      ],
+      "id": "63575630-5665-4382-933c-884bf438630e",
+      "name": "Select Chapters",
+      "webhookId": "954b58fc-5771-44b7-8552-7be20bfe3e21"
+    },
+    {
+      "parameters": {
+        "text": "=Gere os dois documentos do agente RAG conforme o schema.\n\nRESUMO DO DATASET:\n{{ JSON.stringify($('Prepare Chapter Form').first().json.plan.dataset_summary) }}\n\nCOLUNAS (nome, significado, papel):\n{{ JSON.stringify($('Prepare Chapter Form').first().json.plan.columns) }}\n\nCAPÍTULOS DISPONÍVEIS (id, título, descrição, coluna de agrupamento):\n{{ JSON.stringify($('Prepare Chapter Form').first().json.plan.suggested_chapters) }}\n\nCAPÍTULOS SELECIONADOS PELO USUÁRIO (formato \"id — título\"):\n{{ JSON.stringify($json['Capítulos']) }}\n\nCONVENÇÃO DE ARQUIVOS (use exatamente estes nomes ao citar arquivos):\n- 00-system-prompt.md (system prompt do agente)\n- 01-arquitetura-do-agente.md (documento de arquitetura)\n- 02-sumario-busca.md (índice de busca: termo → arquivo → seção; o agente SEMPRE consulta este arquivo primeiro)\n- capitulo-<id>.md para cada capítulo selecionado (ex.: capitulo-regiao.md)\n- capitulo-outliers.md (apenas se \"outliers\" estiver entre os selecionados)\n- dados-rag.json (chunks com metadados para embedding)\n- gerador_capitulos.py (script Python auditável que reproduz os cálculos)\n\nINSTRUÇÕES ADICIONAIS DO USUÁRIO:\n{{ $json['Instruções adicionais (opcional)'] || 'nenhuma' }}",
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"system_prompt_md\": {\n      \"type\": \"string\",\n      \"description\": \"Conteúdo Markdown completo do system prompt do agente\"\n    },\n    \"architecture_md\": {\n      \"type\": \"string\",\n      \"description\": \"Conteúdo Markdown completo do documento de arquitetura, com diagrama mermaid\"\n    }\n  },\n  \"required\": [\n    \"system_prompt_md\",\n    \"architecture_md\"\n  ]\n}",
+        "options": {
+          "systemPromptTemplate": "Você é um arquiteto de agentes de IA. Gere DOIS documentos Markdown completos em português, nos campos system_prompt_md e architecture_md.\n\nsystem_prompt_md — o system prompt de um agente RAG que responderá perguntas usando os arquivos .md gerados. Deve conter:\n- Papel e escopo do agente (responder apenas sobre os dados da planilha).\n- FLUXO DE BUSCA OBRIGATÓRIO: (1) consultar SEMPRE 02-sumario-busca.md primeiro para localizar o arquivo e a seção correlatos ao termo perguntado; (2) responder SOMENTE com o conteúdo do(s) arquivo(s) de capítulo indicados; (3) citar arquivo e seção em toda resposta; (4) se o termo não estiver no sumário, dizer explicitamente que a base não cobre o assunto.\n- Proibições: nunca inventar números, nunca extrapolar além dos dados, nunca usar conhecimento externo para valores.\n- Formato de resposta: direto, com a citação da fonte no final.\n\narchitecture_md — documento de arquitetura do agente. Deve conter:\n- Visão geral da solução (Excel → capítulos .md → agente RAG).\n- Um diagrama mermaid (bloco ```mermaid com graph TD) mostrando: pergunta do usuário → consulta ao 02-sumario-busca.md → roteamento para o capítulo correlato → resposta com citação. Inclua também o fluxo de geração (planilha → workflow n8n → arquivos).\n- Descrição do papel de cada arquivo gerado (use exatamente os nomes de arquivo da convenção informada).\n- Recomendações de ingestão: como usar dados-rag.json (chunks + search_index) em um banco vetorial.\n\nUse APENAS os nomes de arquivos da convenção fornecida no texto. Não invente arquivos nem valores de dados."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1.2,
+      "position": [
+        1760,
+        0
+      ],
+      "id": "aa7f91b9-7caa-4c95-bdfe-db281ecc1989",
+      "name": "Generate Agent Docs"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.sharePointHost.replace(/\\/+$/, '') }}/_api/v2.0/sites/{{ $('Download Excel from SharePoint').params.site.value }}/drive/items/root/children",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "microsoftSharePointOAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"name\": \"agente-rag-{{ $now.toFormat('yyyy-LL-dd-HHmmss') }}\",\n  \"folder\": {},\n  \"@microsoft.graph.conflictBehavior\": \"rename\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1980,
+        0
+      ],
+      "id": "57e9e214-8c2f-401d-b980-7ef0e9ffd3b5",
+      "name": "Create Output Folder"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Gerador determinístico de todos os arquivos da base de conhecimento.\n// Todo conteúdo de dados vem direto das linhas da planilha — a IA contribui\n// apenas com o system prompt, a arquitetura e os títulos/descrições dos capítulos.\nfunction normalizeArray(value) {\n\tif (Array.isArray(value)) return value;\n\tif (value === undefined || value === null || value === '') return [];\n\treturn [value];\n}\n\nconst rows = $('Extract Rows').all().map((item) => item.json);\nconst profile = $('Profile Columns').first().json;\nconst plan = $('Prepare Chapter Form').first().json.plan || {};\nconst docs = $('Generate Agent Docs').first().json.output || {};\nconst selection = $('Select Chapters').first().json;\n\nconst selectedLabels = normalizeArray(selection['Capítulos']);\nconst selectedIds = selectedLabels\n\t.map((label) => String(label).split(' — ')[0].trim())\n\t.filter(Boolean);\nif (!selectedIds.length) {\n\tthrow new Error('Nenhum capítulo foi selecionado no formulário.');\n}\n\nconst sourceFile =\n\t$('On form submission').first().json['Caminho do arquivo Excel'] || 'planilha.xlsx';\nconst generatedAt = new Date().toISOString();\n\nconst IQR_FACTOR = profile.iqrFactor || 1.5;\nconst MAX_GROUPS = 50;\nconst MAX_ROWS_PER_GROUP = 500;\nconst MAX_INDEX_TERMS = 1500;\n\nconst columnsByName = new Map((profile.columns || []).map((c) => [c.name, c]));\nconst chaptersById = new Map((plan.suggested_chapters || []).map((c) => [c.id, c]));\nconst meaningByColumn = new Map((plan.columns || []).map((c) => [c.name, c.meaning || '']));\nconst allColumnNames = (profile.columns || []).map((c) => c.name);\n\nfunction stripAccents(text) {\n\treturn String(text).normalize('NFD').replace(/[\\u0300-\\u036f]/g, '');\n}\nfunction slugify(text) {\n\treturn (\n\t\tstripAccents(text)\n\t\t\t.toLowerCase()\n\t\t\t.replace(/[^a-z0-9]+/g, '-')\n\t\t\t.replace(/^-+|-+$/g, '') || 'secao'\n\t);\n}\nfunction anchorFor(heading) {\n\treturn stripAccents(heading)\n\t\t.toLowerCase()\n\t\t.replace(/[^a-z0-9\\s-]/g, '')\n\t\t.trim()\n\t\t.replace(/\\s+/g, '-');\n}\nfunction esc(value) {\n\treturn String(value === undefined || value === null ? '' : value)\n\t\t.replace(/\\|/g, '\\\\|')\n\t\t.replace(/\\r?\\n/g, ' ');\n}\nfunction fmt(n) {\n\treturn typeof n === 'number' ? String(Math.round(n * 100) / 100) : String(n);\n}\nfunction parseNumber(value) {\n\tif (typeof value === 'number') return Number.isFinite(value) ? value : null;\n\tif (typeof value === 'string') {\n\t\tconst trimmed = value.trim();\n\t\tif (!/^-?\\d+(?:[.,]\\d+)?$/.test(trimmed)) return null;\n\t\treturn Number(trimmed.replace(',', '.'));\n\t}\n\treturn null;\n}\nfunction renderTable(tableRows, cols) {\n\tconst lines = [];\n\tlines.push('| ' + cols.map(esc).join(' | ') + ' |');\n\tlines.push('|' + cols.map(() => ' --- ').join('|') + '|');\n\tfor (const r of tableRows) {\n\t\tlines.push('| ' + cols.map((c) => esc(r[c])).join(' | ') + ' |');\n\t}\n\treturn lines.join('\\n');\n}\n\nconst files = [];\nconst indexChapters = [];\nconst chunks = [];\nconst skippedNotes = [];\n\nconst normalChapterIds = selectedIds.filter((id) => id !== 'outliers');\nconst includeOutliers = selectedIds.includes('outliers');\n\n// ---- Capítulos de dados -------------------------------------------------\nfor (const id of normalChapterIds) {\n\tconst chapter = chaptersById.get(id);\n\tif (!chapter) {\n\t\tskippedNotes.push('Capítulo \"' + id + '\" não encontrado nas sugestões; ignorado.');\n\t\tcontinue;\n\t}\n\tconst groupCol = chapter.group_by_column;\n\tif (!columnsByName.has(groupCol)) {\n\t\tskippedNotes.push(\n\t\t\t'Capítulo \"' + id + '\" ignorado: coluna \"' + groupCol + '\" não existe na planilha.',\n\t\t);\n\t\tcontinue;\n\t}\n\n\tlet covered = (chapter.columns_covered || []).filter((c) => columnsByName.has(c));\n\tif (!covered.length) covered = [...allColumnNames];\n\tif (!covered.includes(groupCol)) covered = [groupCol, ...covered];\n\tconst numericCovered = covered.filter(\n\t\t(c) => c !== groupCol && (columnsByName.get(c) || {}).type === 'number',\n\t);\n\n\tconst groupsMap = new Map();\n\tfor (const row of rows) {\n\t\tconst rawKey = row[groupCol];\n\t\tconst key =\n\t\t\trawKey === undefined || rawKey === null || String(rawKey).trim() === ''\n\t\t\t\t? '(vazio)'\n\t\t\t\t: String(rawKey);\n\t\tif (!groupsMap.has(key)) groupsMap.set(key, []);\n\t\tgroupsMap.get(key).push(row);\n\t}\n\tconst groupKeys = [...groupsMap.keys()].sort((a, b) => a.localeCompare(b, 'pt-BR'));\n\n\tconst fileName = 'capitulo-' + id + '.md';\n\tconst lines = [];\n\tlines.push('# ' + (chapter.title || id));\n\tlines.push('');\n\tlines.push(\n\t\t'> Gerado deterministicamente de \"' +\n\t\t\tsourceFile +\n\t\t\t'\" em ' +\n\t\t\tgeneratedAt +\n\t\t\t'. Nenhum valor foi inventado por IA.',\n\t);\n\tlines.push('');\n\tif (chapter.description) {\n\t\tlines.push('**Descrição (interpretação da IA):** ' + chapter.description);\n\t\tlines.push('');\n\t}\n\tlines.push('- Coluna de agrupamento: **' + groupCol + '**');\n\tlines.push('- Grupos: **' + groupKeys.length + '** | Registros no total: **' + rows.length + '**');\n\tlines.push('- Colunas cobertas: ' + covered.join(', '));\n\tlines.push('');\n\n\tconst sections = [];\n\n\tif (groupKeys.length > MAX_GROUPS) {\n\t\tconst maxRows = MAX_ROWS_PER_GROUP * 4;\n\t\tconst heading = 'Tabela completa ordenada por ' + groupCol;\n\t\tconst anchor = anchorFor(heading);\n\t\tlines.push('## ' + heading);\n\t\tlines.push('');\n\t\tlines.push(\n\t\t\t'> A coluna \"' +\n\t\t\t\tgroupCol +\n\t\t\t\t'\" tem ' +\n\t\t\t\tgroupKeys.length +\n\t\t\t\t' valores distintos (mais que ' +\n\t\t\t\tMAX_GROUPS +\n\t\t\t\t'), então este capítulo usa uma tabela única ordenada em vez de uma seção por grupo.',\n\t\t);\n\t\tlines.push('');\n\t\tconst sortedRows = [...rows].sort((a, b) =>\n\t\t\tString(a[groupCol]).localeCompare(String(b[groupCol]), 'pt-BR'),\n\t\t);\n\t\tlines.push(renderTable(sortedRows.slice(0, maxRows), covered));\n\t\tif (sortedRows.length > maxRows) {\n\t\t\tlines.push('');\n\t\t\tlines.push(\n\t\t\t\t'> Tabela truncada em ' +\n\t\t\t\t\tmaxRows +\n\t\t\t\t\t' de ' +\n\t\t\t\t\tsortedRows.length +\n\t\t\t\t\t' linhas. Os dados completos estão em dados-rag.json.',\n\t\t\t);\n\t\t}\n\t\tsections.push({ group: '(tabela única)', anchor, rowCount: rows.length });\n\t\tchunks.push({\n\t\t\tid: id + '--tabela-completa',\n\t\t\tchapter: id,\n\t\t\tgroup: '(tabela única)',\n\t\t\ttext: lines.join('\\n'),\n\t\t\tmetadata: {\n\t\t\t\tsource_file: fileName,\n\t\t\t\tsection_anchor: anchor,\n\t\t\t\tcolumns: covered,\n\t\t\t\trowCount: rows.length,\n\t\t\t\tkeywords: [groupCol, chapter.title || id],\n\t\t\t},\n\t\t});\n\t} else {\n\t\tfor (const key of groupKeys) {\n\t\t\tconst groupRows = groupsMap.get(key);\n\t\t\tconst heading = groupCol + ': ' + key;\n\t\t\tconst anchor = anchorFor(heading);\n\t\t\tconst sLines = [];\n\t\t\tsLines.push('## ' + heading);\n\t\t\tsLines.push('');\n\t\t\tsLines.push('- Registros: **' + groupRows.length + '**');\n\t\t\tfor (const nc of numericCovered) {\n\t\t\t\tlet sum = 0;\n\t\t\t\tlet min = null;\n\t\t\t\tlet max = null;\n\t\t\t\tlet count = 0;\n\t\t\t\tfor (const r of groupRows) {\n\t\t\t\t\tconst n = parseNumber(r[nc]);\n\t\t\t\t\tif (n === null) continue;\n\t\t\t\t\tsum += n;\n\t\t\t\t\tcount += 1;\n\t\t\t\t\tif (min === null || n < min) min = n;\n\t\t\t\t\tif (max === null || n > max) max = n;\n\t\t\t\t}\n\t\t\t\tif (!count) continue;\n\t\t\t\tsLines.push(\n\t\t\t\t\t'- ' +\n\t\t\t\t\t\tnc +\n\t\t\t\t\t\t': soma **' +\n\t\t\t\t\t\tfmt(sum) +\n\t\t\t\t\t\t'** | média **' +\n\t\t\t\t\t\tfmt(sum / count) +\n\t\t\t\t\t\t'** | mín **' +\n\t\t\t\t\t\tfmt(min) +\n\t\t\t\t\t\t'** | máx **' +\n\t\t\t\t\t\tfmt(max) +\n\t\t\t\t\t\t'**',\n\t\t\t\t);\n\t\t\t}\n\t\t\tsLines.push('');\n\t\t\tsLines.push(renderTable(groupRows.slice(0, MAX_ROWS_PER_GROUP), covered));\n\t\t\tif (groupRows.length > MAX_ROWS_PER_GROUP) {\n\t\t\t\tsLines.push('');\n\t\t\t\tsLines.push(\n\t\t\t\t\t'> Tabela truncada em ' +\n\t\t\t\t\t\tMAX_ROWS_PER_GROUP +\n\t\t\t\t\t\t' de ' +\n\t\t\t\t\t\tgroupRows.length +\n\t\t\t\t\t\t' linhas. Os agregados acima consideram TODAS as linhas do grupo.',\n\t\t\t\t);\n\t\t\t}\n\t\t\tconst sectionMd = sLines.join('\\n');\n\t\t\tlines.push(sectionMd);\n\t\t\tlines.push('');\n\t\t\tsections.push({ group: key, anchor, rowCount: groupRows.length });\n\t\t\tchunks.push({\n\t\t\t\tid: id + '--' + slugify(key),\n\t\t\t\tchapter: id,\n\t\t\t\tgroup: key,\n\t\t\t\ttext: sectionMd,\n\t\t\t\tmetadata: {\n\t\t\t\t\tsource_file: fileName,\n\t\t\t\t\tsection_anchor: anchor,\n\t\t\t\t\tcolumns: covered,\n\t\t\t\t\trowCount: groupRows.length,\n\t\t\t\t\tkeywords: [key, groupCol, chapter.title || id],\n\t\t\t\t},\n\t\t\t});\n\t\t}\n\t}\n\n\tfiles.push({ fileName, content: lines.join('\\n') });\n\tindexChapters.push({\n\t\tid,\n\t\tfileName,\n\t\ttitle: chapter.title || id,\n\t\tdescription: chapter.description || '',\n\t\tgroupCol,\n\t\tcovered,\n\t\tsections,\n\t});\n}\n\n// ---- Capítulo de outliers ----------------------------------------------\nif (includeOutliers) {\n\tconst fileName = 'capitulo-outliers.md';\n\tconst lines = [];\n\tlines.push('# Outliers e anomalias (critério IQR)');\n\tlines.push('');\n\tlines.push(\n\t\t'> Gerado deterministicamente de \"' +\n\t\t\tsourceFile +\n\t\t\t'\" em ' +\n\t\t\tgeneratedAt +\n\t\t\t'. Outlier = valor fora de [Q1 − ' +\n\t\t\tIQR_FACTOR +\n\t\t\t'·IQR, Q3 + ' +\n\t\t\tIQR_FACTOR +\n\t\t\t'·IQR].',\n\t);\n\tlines.push('');\n\tconst sections = [];\n\tlet any = false;\n\tfor (const col of profile.columns || []) {\n\t\tif (!col.outliers || !col.outliers.count) continue;\n\t\tany = true;\n\t\tconst heading = 'Coluna: ' + col.name;\n\t\tconst anchor = anchorFor(heading);\n\t\tconst outRows = [];\n\t\tfor (let i = 0; i < rows.length; i++) {\n\t\t\tconst n = parseNumber(rows[i][col.name]);\n\t\t\tif (n !== null && (n < col.outliers.lowerBound || n > col.outliers.upperBound)) {\n\t\t\t\toutRows.push({ linha_excel: i + 2, ...rows[i] });\n\t\t\t}\n\t\t}\n\t\tconst sLines = [];\n\t\tsLines.push('## ' + heading);\n\t\tsLines.push('');\n\t\tsLines.push(\n\t\t\t'- Faixa normal: ' +\n\t\t\t\tfmt(col.outliers.lowerBound) +\n\t\t\t\t' a ' +\n\t\t\t\tfmt(col.outliers.upperBound) +\n\t\t\t\t' | Outliers: **' +\n\t\t\t\toutRows.length +\n\t\t\t\t'**',\n\t\t);\n\t\tsLines.push('');\n\t\tsLines.push(renderTable(outRows.slice(0, MAX_ROWS_PER_GROUP), ['linha_excel', ...allColumnNames]));\n\t\tif (outRows.length > MAX_ROWS_PER_GROUP) {\n\t\t\tsLines.push('');\n\t\t\tsLines.push('> Tabela truncada em ' + MAX_ROWS_PER_GROUP + ' de ' + outRows.length + ' linhas.');\n\t\t}\n\t\tconst sectionMd = sLines.join('\\n');\n\t\tlines.push(sectionMd);\n\t\tlines.push('');\n\t\tsections.push({ group: col.name, anchor, rowCount: outRows.length });\n\t\tchunks.push({\n\t\t\tid: 'outliers--' + slugify(col.name),\n\t\t\tchapter: 'outliers',\n\t\t\tgroup: col.name,\n\t\t\ttext: sectionMd,\n\t\t\tmetadata: {\n\t\t\t\tsource_file: fileName,\n\t\t\t\tsection_anchor: anchor,\n\t\t\t\tcolumns: allColumnNames,\n\t\t\t\trowCount: outRows.length,\n\t\t\t\tkeywords: [col.name, 'outlier', 'anomalia', 'IQR'],\n\t\t\t},\n\t\t});\n\t}\n\tif (!any) {\n\t\tlines.push('Nenhum outlier numérico foi detectado pelo critério IQR nesta planilha.');\n\t}\n\tfiles.push({ fileName, content: lines.join('\\n') });\n\tindexChapters.push({\n\t\tid: 'outliers',\n\t\tfileName,\n\t\ttitle: 'Outliers e anomalias (IQR)',\n\t\tdescription: 'Valores numéricos fora da faixa interquartil esperada.',\n\t\tgroupCol: '(colunas numéricas)',\n\t\tcovered: allColumnNames,\n\t\tsections,\n\t});\n}\n\nif (!indexChapters.length) {\n\tthrow new Error(\n\t\t'Nenhum capítulo pôde ser gerado. Detalhes: ' + (skippedNotes.join(' ') || 'seleção vazia.'),\n\t);\n}\n\n// ---- 02-sumario-busca.md (índice de roteamento para o agente) -----------\nconst fixedFiles = [\n\t['00-system-prompt.md', 'System prompt do agente', 'Configuração do agente; não responde perguntas de dados.'],\n\t['01-arquitetura-do-agente.md', 'Arquitetura do agente', 'Entender o desenho da solução e o fluxo RAG.'],\n\t['02-sumario-busca.md', 'Sumário de busca (este arquivo)', 'SEMPRE consultar primeiro para achar o arquivo certo.'],\n\t['dados-rag.json', 'Chunks com metadados para embedding', 'Ingestão em banco vetorial / busca programática.'],\n\t['gerador_capitulos.py', 'Script Python auditável', 'Reproduzir/auditar os cálculos dos capítulos.'],\n];\n\nconst sumLines = [];\nsumLines.push('# 02 — Sumário de busca');\nsumLines.push('');\nsumLines.push(\n\t'> PROTOCOLO DO AGENTE: antes de responder qualquer pergunta, localize aqui o arquivo e a seção correlatos ao termo perguntado. Responda SOMENTE com dados do arquivo indicado, citando arquivo e seção. Se o termo não estiver neste sumário, informe que a base não cobre o assunto.',\n);\nsumLines.push('');\nsumLines.push('Fonte: \"' + sourceFile + '\" | ' + rows.length + ' registros | gerado em ' + generatedAt);\nsumLines.push('');\nsumLines.push('## Mapa de arquivos');\nsumLines.push('');\nsumLines.push('| Arquivo | Conteúdo | Quando usar |');\nsumLines.push('| --- | --- | --- |');\nfor (const [f, what, when] of fixedFiles) {\n\tsumLines.push('| `' + f + '` | ' + what + ' | ' + when + ' |');\n}\nfor (const ch of indexChapters) {\n\tsumLines.push(\n\t\t'| `' +\n\t\t\tch.fileName +\n\t\t\t'` | ' +\n\t\t\tesc(ch.title) +\n\t\t\t' (agrupado por ' +\n\t\t\tesc(ch.groupCol) +\n\t\t\t') | Perguntas sobre ' +\n\t\t\tesc(ch.groupCol) +\n\t\t\t' ou ' +\n\t\t\tesc(ch.title.toLowerCase()) +\n\t\t\t' |',\n\t);\n}\nsumLines.push('');\n\nfor (const ch of indexChapters) {\n\tsumLines.push('## `' + ch.fileName + '` — ' + ch.title);\n\tsumLines.push('');\n\tif (ch.description) sumLines.push(ch.description);\n\tconst keywords = new Set([ch.groupCol, ch.title]);\n\tfor (const c of ch.covered) {\n\t\tkeywords.add(c);\n\t\tconst meaning = meaningByColumn.get(c);\n\t\tif (meaning) keywords.add(meaning);\n\t}\n\tsumLines.push('');\n\tsumLines.push('- Palavras-chave: ' + [...keywords].map(esc).join('; '));\n\tsumLines.push('- Seções (' + ch.sections.length + '):');\n\tfor (const s of ch.sections) {\n\t\tsumLines.push('  - [' + esc(s.group) + '](' + ch.fileName + '#' + s.anchor + ') — ' + s.rowCount + ' registros');\n\t}\n\tsumLines.push('');\n}\n\nsumLines.push('## Índice invertido (termo → arquivo → seção)');\nsumLines.push('');\nsumLines.push('| Termo | Arquivo | Seção (âncora) |');\nsumLines.push('| --- | --- | --- |');\nlet termCount = 0;\nfor (const ch of indexChapters) {\n\tfor (const s of ch.sections) {\n\t\tif (termCount >= MAX_INDEX_TERMS) break;\n\t\tsumLines.push('| ' + esc(s.group) + ' | `' + ch.fileName + '` | #' + s.anchor + ' |');\n\t\ttermCount += 1;\n\t}\n}\nif (termCount >= MAX_INDEX_TERMS) {\n\tsumLines.push('');\n\tsumLines.push('> Índice truncado em ' + MAX_INDEX_TERMS + ' termos. A lista completa está em dados-rag.json (search_index).');\n}\nif (skippedNotes.length) {\n\tsumLines.push('');\n\tsumLines.push('## Avisos de geração');\n\tsumLines.push('');\n\tfor (const note of skippedNotes) sumLines.push('- ' + note);\n}\n\n// ---- 00-system-prompt.md e 01-arquitetura-do-agente.md -------------------\nconst allFileNames = [\n\t'00-system-prompt.md',\n\t'01-arquitetura-do-agente.md',\n\t'02-sumario-busca.md',\n\t...indexChapters.map((c) => c.fileName),\n\t'dados-rag.json',\n\t'gerador_capitulos.py',\n];\n\nlet systemPrompt = String(docs.system_prompt_md || '').trim();\nif (!systemPrompt) {\n\tsystemPrompt = '# System prompt do agente\\n\\n(A IA não retornou conteúdo; siga o protocolo abaixo.)';\n}\nsystemPrompt +=\n\t'\\n\\n---\\n\\n## Protocolo de busca obrigatório (gerado automaticamente)\\n\\n' +\n\t'1. Consulte SEMPRE `02-sumario-busca.md` primeiro e localize o arquivo/seção correlato ao termo da pergunta.\\n' +\n\t'2. Responda usando SOMENTE o conteúdo do(s) arquivo(s) de capítulo indicados pelo sumário.\\n' +\n\t'3. Cite o arquivo e a seção usados na resposta (ex.: `capitulo-regiao.md#regiao-sul`).\\n' +\n\t'4. Se o termo não constar no sumário, responda que a base de conhecimento não cobre o assunto. Nunca invente valores.\\n' +\n\t'\\n### Inventário de arquivos\\n\\n' +\n\tallFileNames.map((f) => '- `' + f + '`').join('\\n') +\n\t'\\n';\n\nlet architecture = String(docs.architecture_md || '').trim();\nif (!architecture) {\n\tarchitecture = '# Arquitetura do agente\\n\\n(A IA não retornou conteúdo.)';\n}\narchitecture +=\n\t'\\n\\n---\\n\\n## Inventário RAG (gerado automaticamente)\\n\\n```json\\n' +\n\tJSON.stringify(\n\t\t{\n\t\t\tgenerated_at: generatedAt,\n\t\t\tsource_file: sourceFile,\n\t\t\trow_count: rows.length,\n\t\t\tchunk_count: chunks.length,\n\t\t\tfiles: allFileNames,\n\t\t\tchapters: indexChapters.map((c) => ({\n\t\t\t\tid: c.id,\n\t\t\t\tfile: c.fileName,\n\t\t\t\ttitle: c.title,\n\t\t\t\tgroup_by: c.groupCol,\n\t\t\t\tsections: c.sections.length,\n\t\t\t})),\n\t\t},\n\t\tnull,\n\t\t2,\n\t) +\n\t'\\n```\\n';\n\n// ---- dados-rag.json -------------------------------------------------------\nconst searchIndex = [];\nfor (const ch of indexChapters) {\n\tfor (const s of ch.sections) {\n\t\tsearchIndex.push({\n\t\t\tkeywords: [s.group, ch.groupCol, ch.title].filter(Boolean),\n\t\t\tfile: ch.fileName,\n\t\t\tsection: s.anchor,\n\t\t\trowCount: s.rowCount,\n\t\t});\n\t}\n}\nconst ragJson = {\n\tgenerated_at: generatedAt,\n\tsource_file: sourceFile,\n\trow_count: rows.length,\n\tchapters: indexChapters.map((c) => ({\n\t\tid: c.id,\n\t\tfile: c.fileName,\n\t\ttitle: c.title,\n\t\tdescription: c.description,\n\t\tgroup_by: c.groupCol,\n\t\tcolumns: c.covered,\n\t})),\n\tsearch_index: searchIndex,\n\tchunks,\n};\n\n// ---- gerador_capitulos.py -------------------------------------------------\nconst pyConfig = {\n\tsource_file: sourceFile,\n\tgenerated_at: generatedAt,\n\tiqr_factor: IQR_FACTOR,\n\tmax_groups: MAX_GROUPS,\n\tmax_rows_per_group: MAX_ROWS_PER_GROUP,\n\tinclude_outliers: includeOutliers,\n\tchapters: indexChapters\n\t\t.filter((c) => c.id !== 'outliers')\n\t\t.map((c) => ({\n\t\t\tid: c.id,\n\t\t\ttitle: c.title,\n\t\t\tdescription: c.description,\n\t\t\tgroup_by_column: c.groupCol,\n\t\t\tcolumns_covered: c.covered,\n\t\t})),\n};\nconst pyConfigJson = JSON.stringify(pyConfig, null, 2).replace(/'/g, '\\\\u0027');\n\nconst py = [\n\t'#!/usr/bin/env python3',\n\t'# -*- coding: utf-8 -*-',\n\t'\"\"\"Gerador deterministico dos capitulos .md da base de conhecimento.',\n\t'',\n\t'Reproduz, de forma auditavel, os calculos feitos pelo workflow n8n',\n\t'\"Excel -> Markdown RAG\": agrupamentos, agregados (soma/media/min/max)',\n\t'e deteccao de outliers por IQR. Nenhuma IA e usada aqui.',\n\t'',\n\t'Uso:',\n\t'    python gerador_capitulos.py caminho/para/planilha.xlsx [pasta_saida]',\n\t'',\n\t'Requisitos: pandas, openpyxl',\n\t'\"\"\"',\n\t'import json',\n\t'import math',\n\t'import os',\n\t'import sys',\n\t'import unicodedata',\n\t'',\n\t'import pandas as pd',\n\t'',\n\t\"CONFIG = json.loads(r'''__PY_CONFIG__''')\",\n\t'',\n\t\"IQR_FACTOR = CONFIG['iqr_factor']\",\n\t\"MAX_ROWS_PER_GROUP = CONFIG['max_rows_per_group']\",\n\t\"MAX_GROUPS = CONFIG['max_groups']\",\n\t'',\n\t'',\n\t'def strip_accents(text):',\n\t\"    return ''.join(\",\n\t\"        ch for ch in unicodedata.normalize('NFD', str(text))\",\n\t\"        if unicodedata.category(ch) != 'Mn'\",\n\t'    )',\n\t'',\n\t'',\n\t'def slugify(text):',\n\t'    out = []',\n\t'    prev_dash = False',\n\t'    for ch in strip_accents(text).lower():',\n\t'        if ch.isalnum():',\n\t'            out.append(ch)',\n\t'            prev_dash = False',\n\t'        elif not prev_dash:',\n\t\"            out.append('-')\",\n\t'            prev_dash = True',\n\t\"    return ''.join(out).strip('-') or 'secao'\",\n\t'',\n\t'',\n\t'def esc(value):',\n\t\"    if value is None or (isinstance(value, float) and math.isnan(value)):\",\n\t\"        return ''\",\n\t\"    return str(value).replace('|', '\\\\\\\\|').replace('\\\\n', ' ')\",\n\t'',\n\t'',\n\t'def render_table(df, cols):',\n\t\"    lines = ['| ' + ' | '.join(esc(c) for c in cols) + ' |']\",\n\t\"    lines.append('|' + '|'.join(' --- ' for _ in cols) + '|')\",\n\t'    for _, row in df.iterrows():',\n\t\"        lines.append('| ' + ' | '.join(esc(row.get(c, '')) for c in cols) + ' |')\",\n\t\"    return '\\\\n'.join(lines)\",\n\t'',\n\t'',\n\t'def fmt(n):',\n\t'    return str(round(float(n) * 100) / 100)',\n\t'',\n\t'',\n\t'def build_chapter(df, chapter, out_dir):',\n\t\"    group_col = chapter['group_by_column']\",\n\t\"    covered = [c for c in chapter['columns_covered'] if c in df.columns] or list(df.columns)\",\n\t'    if group_col not in covered:',\n\t'        covered = [group_col] + covered',\n\t'    numeric = [',\n\t'        c for c in covered',\n\t'        if c != group_col and pd.api.types.is_numeric_dtype(pd.to_numeric(df[c], errors=\"coerce\"))',\n\t'        and pd.to_numeric(df[c], errors=\"coerce\").notna().mean() >= 0.9',\n\t'    ]',\n\t\"    lines = ['# ' + chapter['title'], '']\",\n\t\"    if chapter.get('description'):\",\n\t\"        lines += ['**Descrição:** ' + chapter['description'], '']\",\n\t\"    lines += ['- Coluna de agrupamento: **' + group_col + '**', '']\",\n\t'    groups = sorted(df.groupby(df[group_col].fillna(\"(vazio)\").astype(str)), key=lambda kv: kv[0])',\n\t'    if len(groups) > MAX_GROUPS:',\n\t\"        lines += ['## Tabela completa ordenada por ' + group_col, '']\",\n\t'        ordered = df.sort_values(by=group_col, key=lambda s: s.astype(str))',\n\t'        lines.append(render_table(ordered.head(MAX_ROWS_PER_GROUP * 4), covered))',\n\t'    else:',\n\t'        for key, gdf in groups:',\n\t\"            lines += ['## ' + group_col + ': ' + str(key), '', '- Registros: **' + str(len(gdf)) + '**']\",\n\t'            for nc in numeric:',\n\t'                nums = pd.to_numeric(gdf[nc], errors=\"coerce\").dropna()',\n\t'                if nums.empty:',\n\t'                    continue',\n\t\"                lines.append('- ' + nc + ': soma **' + fmt(nums.sum()) + '** | média **' + fmt(nums.mean()) + '** | mín **' + fmt(nums.min()) + '** | máx **' + fmt(nums.max()) + '**')\",\n\t\"            lines.append('')\",\n\t'            lines.append(render_table(gdf.head(MAX_ROWS_PER_GROUP), covered))',\n\t'            if len(gdf) > MAX_ROWS_PER_GROUP:',\n\t\"                lines += ['', '> Tabela truncada em ' + str(MAX_ROWS_PER_GROUP) + ' de ' + str(len(gdf)) + ' linhas.']\",\n\t\"            lines.append('')\",\n\t\"    path = os.path.join(out_dir, 'capitulo-' + chapter['id'] + '.md')\",\n\t\"    with open(path, 'w', encoding='utf-8') as fh:\",\n\t\"        fh.write('\\\\n'.join(lines))\",\n\t'    return path',\n\t'',\n\t'',\n\t'def build_outliers(df, out_dir):',\n\t\"    lines = ['# Outliers e anomalias (critério IQR)', '']\",\n\t'    for col in df.columns:',\n\t'        nums = pd.to_numeric(df[col], errors=\"coerce\")',\n\t'        if nums.notna().mean() < 0.9 or nums.dropna().empty:',\n\t'            continue',\n\t'        q1, q3 = nums.quantile(0.25), nums.quantile(0.75)',\n\t'        iqr = q3 - q1',\n\t'        lower, upper = q1 - IQR_FACTOR * iqr, q3 + IQR_FACTOR * iqr',\n\t'        mask = (nums < lower) | (nums > upper)',\n\t'        if not mask.any():',\n\t'            continue',\n\t\"        lines += ['## Coluna: ' + col, '',\",\n\t\"                  '- Faixa normal: ' + fmt(lower) + ' a ' + fmt(upper) + ' | Outliers: **' + str(int(mask.sum())) + '**', '']\",\n\t'        out_df = df[mask].copy()',\n\t\"        out_df.insert(0, 'linha_excel', [i + 2 for i in df.index[mask]])\",\n\t\"        lines.append(render_table(out_df.head(MAX_ROWS_PER_GROUP), list(out_df.columns)))\",\n\t\"        lines.append('')\",\n\t\"    path = os.path.join(out_dir, 'capitulo-outliers.md')\",\n\t\"    with open(path, 'w', encoding='utf-8') as fh:\",\n\t\"        fh.write('\\\\n'.join(lines))\",\n\t'    return path',\n\t'',\n\t'',\n\t'def main():',\n\t\"    src = sys.argv[1] if len(sys.argv) > 1 else CONFIG['source_file']\",\n\t\"    out_dir = sys.argv[2] if len(sys.argv) > 2 else '.'\",\n\t'    os.makedirs(out_dir, exist_ok=True)',\n\t'    df = pd.read_excel(src)',\n\t'    written = []',\n\t\"    for chapter in CONFIG['chapters']:\",\n\t'        written.append(build_chapter(df, chapter, out_dir))',\n\t\"    if CONFIG['include_outliers']:\",\n\t'        written.append(build_outliers(df, out_dir))',\n\t\"    print('Arquivos gerados:')\",\n\t'    for path in written:',\n\t\"        print('  ' + path)\",\n\t'',\n\t'',\n\t\"if __name__ == '__main__':\",\n\t'    main()',\n\t'',\n]\n\t.join('\\n')\n\t.replace('__PY_CONFIG__', pyConfigJson);\n\n// ---- Monta a lista final na ordem de leitura -----------------------------\nconst orderedFiles = [\n\t{ fileName: '00-system-prompt.md', content: systemPrompt },\n\t{ fileName: '01-arquitetura-do-agente.md', content: architecture },\n\t{ fileName: '02-sumario-busca.md', content: sumLines.join('\\n') },\n\t...files,\n\t{ fileName: 'dados-rag.json', content: JSON.stringify(ragJson, null, 2) },\n\t{ fileName: 'gerador_capitulos.py', content: py },\n];\n\nreturn orderedFiles.map((f) => ({ json: f }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        0
+      ],
+      "id": "46bc88fc-432a-414c-a578-839c34aa60e3",
+      "name": "Build All Files"
+    },
+    {
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "content",
+        "binaryPropertyName": "data",
+        "options": {
+          "fileName": "={{ $json.fileName }}"
+        }
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        2420,
+        0
+      ],
+      "id": "43228fba-606e-4ee3-b123-ee0e4f150605",
+      "name": "Convert to File"
+    },
+    {
+      "parameters": {
+        "resource": "file",
+        "operation": "upload",
+        "site": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "folder": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Create Output Folder').first().json.id }}"
+        },
+        "fileName": "={{ $binary.data.fileName }}",
+        "fileContents": "data",
+        "requestOptions": {}
+      },
+      "type": "n8n-nodes-base.microsoftSharePoint",
+      "typeVersion": 1,
+      "position": [
+        2640,
+        0
+      ],
+      "id": "b2501620-496b-4b1a-8d20-c53254ae354e",
+      "name": "Upload to SharePoint"
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "respondWith": "text",
+        "completionTitle": "Arquivos gerados com sucesso",
+        "completionMessage": "=Foram gerados {{ $('Build All Files').all().length }} arquivos na pasta \"{{ $('Create Output Folder').first().json.name }}\" da biblioteca Documentos do SharePoint.",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.3,
+      "position": [
+        2860,
+        0
+      ],
+      "id": "2b43b3f6-08d7-46cc-a33a-02a9b792c003",
+      "name": "Done",
+      "webhookId": "d51ed5c5-95c8-42a9-be55-d401266faf80"
+    }
+  ],
+  "connections": {
+    "On form submission": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Download Excel from SharePoint",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Excel from SharePoint": {
+      "main": [
+        [
+          {
+            "node": "Extract Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Rows": {
+      "main": [
+        [
+          {
+            "node": "Profile Columns",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Profile Columns": {
+      "main": [
+        [
+          {
+            "node": "Suggest Chapters",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Suggest Chapters": {
+      "main": [
+        [
+          {
+            "node": "Prepare Chapter Form",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Chapter Form": {
+      "main": [
+        [
+          {
+            "node": "Select Chapters",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Select Chapters": {
+      "main": [
+        [
+          {
+            "node": "Generate Agent Docs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Agent Docs": {
+      "main": [
+        [
+          {
+            "node": "Create Output Folder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Output Folder": {
+      "main": [
+        [
+          {
+            "node": "Build All Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build All Files": {
+      "main": [
+        [
+          {
+            "node": "Convert to File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert to File": {
+      "main": [
+        [
+          {
+            "node": "Upload to SharePoint",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload to SharePoint": {
+      "main": [
+        [
+          {
+            "node": "Done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Suggest Chapters",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "Generate Agent Docs",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
