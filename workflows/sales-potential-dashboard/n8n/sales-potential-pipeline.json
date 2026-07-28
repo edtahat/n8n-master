@@ -1,0 +1,309 @@
+{
+  "nodes": [
+    {
+      "id": "f0739e8f-b13a-46fd-82a7-f2cc1201824a",
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -2016,
+        16
+      ],
+      "parameters": {
+        "workflowInputs": {
+          "values": []
+        },
+        "returnOutput": "allRuns"
+      }
+    },
+    {
+      "id": "ec98f5ce-0f60-4225-a6ec-666d986d1e11",
+      "name": "Baixar UFxCustomer.xlsx",
+      "type": "n8n-nodes-base.microsoftSharePoint",
+      "typeVersion": 1,
+      "position": [
+        -1792,
+        16
+      ],
+      "parameters": {
+        "site": {
+          "__rl": true,
+          "value": "bosch.sharepoint.com,ea49b739-f519-4734-91e4-0ade5644a5b3,f18d8d40-4299-40de-8ddc-38ec09a0cccf",
+          "mode": "list",
+          "cachedResultName": "MA-LA Amplify the best of US"
+        },
+        "folder": {
+          "__rl": true,
+          "value": "014YGBPIYJDGGWYXQYCBGIEAYCE62XJ2GG",
+          "mode": "list",
+          "cachedResultName": "Sales Potential database"
+        },
+        "file": {
+          "__rl": true,
+          "value": "014YGBPIY43O2FSYDKIVB2K324KWESHG6V",
+          "mode": "list",
+          "cachedResultName": "UFxCustomer.xlsx"
+        },
+        "requestOptions": {}
+      },
+      "executeOnce": true,
+      "credentials": {
+        "microsoftSharePointOAuth2Api": {
+          "id": "UxA1PJZPVsXu3vzh",
+          "name": "Microsoft SharePoint"
+        }
+      }
+    },
+    {
+      "id": "1d7d9554-5559-420d-8bfd-2c5b69e828e8",
+      "name": "Customer_Branch",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        -1568,
+        16
+      ],
+      "parameters": {
+        "operation": "xlsx",
+        "options": {}
+      }
+    },
+    {
+      "id": "dca95b88-eec7-4b5b-b79d-84b41c44dbf0",
+      "name": "Baixar PBI_Sales_Potential.xlsx",
+      "type": "n8n-nodes-base.microsoftSharePoint",
+      "typeVersion": 1,
+      "position": [
+        -1344,
+        16
+      ],
+      "parameters": {
+        "site": {
+          "__rl": true,
+          "value": "bosch.sharepoint.com,ea49b739-f519-4734-91e4-0ade5644a5b3,f18d8d40-4299-40de-8ddc-38ec09a0cccf",
+          "mode": "list",
+          "cachedResultName": "MA-LA Amplify the best of US"
+        },
+        "folder": {
+          "__rl": true,
+          "value": "014YGBPIYJDGGWYXQYCBGIEAYCE62XJ2GG",
+          "mode": "list",
+          "cachedResultName": "Sales Potential database"
+        },
+        "file": {
+          "__rl": true,
+          "value": "014YGBPIYK5M7G6MOINZGZXVEIHUA6HILT",
+          "mode": "list",
+          "cachedResultName": "PBI_Sales_Potential.xlsx"
+        },
+        "requestOptions": {}
+      },
+      "executeOnce": true,
+      "credentials": {
+        "microsoftSharePointOAuth2Api": {
+          "id": "UxA1PJZPVsXu3vzh",
+          "name": "Microsoft SharePoint"
+        }
+      }
+    },
+    {
+      "id": "deb9441e-875c-4020-8a37-12935676cb14",
+      "name": "PBI_Sales_Potential",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        -1120,
+        16
+      ],
+      "parameters": {
+        "operation": "xlsx",
+        "options": {}
+      }
+    },
+    {
+      "id": "92d7814d-1b7a-46c4-b4ab-b5123f123578",
+      "name": "Montar Lista de Materiais",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -896,
+        16
+      ],
+      "parameters": {
+        "jsCode": "// Monta a lista de materiais (10 dígitos / Part Number) presentes na planilha\n// PBI_Sales_Potential, para restringir a consulta de frota (Fleet_percent) só\n// aos materiais que realmente aparecem nesta execução.\n//\n// FIX (revisão): antes este node só reconhecia a coluna \"10 dígitos\". O node\n// \"Calcular Distribuicao do Extra\" já aceitava vários nomes alternativos\n// (Part Number, Part_Number, Material...) para a MESMA coluna. Se a planilha\n// usasse um desses nomes alternativos, este node gerava lista_materiais vazia\n// ('') sem avisar, a consulta SQL de frota voltava zerada, e TODAS as linhas\n// caíam depois na exceção \"Part Number sem frota nacional\" — um bug que\n// parecia um problema de frota mas na verdade era de nome de coluna.\n//\n// Mantenha PART_NUMBER_ALIASES em sincronia com os aliases usados para\n// Part_Number no node \"Calcular Distribuicao do Extra\".\nconst PART_NUMBER_ALIASES = [\n  '10dígitos',\n  '10 dígitos',\n  '10 digitos',\n  '10digitos',\n  'Part Number',\n  'Part_Number',\n  'Material',\n];\n\nconst DIACRITICS_REGEX = new RegExp('[' + String.fromCharCode(0x0300) + '-' + String.fromCharCode(0x036f) + ']', 'g');\n\nfunction normalizeKey(key) {\n  return String(key ?? '')\n    .normalize('NFD')\n    .replace(DIACRITICS_REGEX, '')\n    .replace(/[^a-zA-Z0-9]/g, '')\n    .toLowerCase();\n}\n\nconst targetKeys = new Set(PART_NUMBER_ALIASES.map(normalizeKey));\n\nconst allItems = $input.all();\n\nconst rawValues = [];\nlet linhasSemColunaReconhecida = 0;\n\nfor (const item of allItems) {\n  const matchedKey = Object.keys(item.json).find((k) => targetKeys.has(normalizeKey(k)));\n\n  if (!matchedKey) {\n    linhasSemColunaReconhecida++;\n    continue;\n  }\n\n  const val = item.json[matchedKey];\n  if (val === null || val === undefined) continue;\n\n  const strVal = String(val).trim();\n  if (strVal !== '') rawValues.push(strVal);\n}\n\n// Boundary check: isto é dado externo (planilha do SharePoint). Se NENHUMA\n// linha tiver uma coluna reconhecível, é melhor falhar alto e claro aqui do\n// que deixar o resto do pipeline rodar silenciosamente com frota zerada.\nif (allItems.length > 0 && linhasSemColunaReconhecida === allItems.length) {\n  const cabecalhosEncontrados = Object.keys(allItems[0]?.json ?? {}).join(', ') || '(nenhum)';\n  throw new Error(\n    'Nenhuma linha de PBI_Sales_Potential tem uma coluna reconhecida como Part Number/10 dígitos. ' +\n      `Cabeçalhos encontrados: ${cabecalhosEncontrados}. ` +\n      'Adicione o nome real da coluna em PART_NUMBER_ALIASES neste node.',\n  );\n}\n\nconst distinctValues = [...new Set(rawValues)];\n\nlet sqlInString = distinctValues.map((m) => `'${m.replace(/'/g, \"''\")}'`).join(',');\n\n// Prevenção de erro: se o arquivo não tiver nenhum código válido, injeta ''\nif (sqlInString === '') {\n  sqlInString = \"''\";\n}\n\nreturn [\n  {\n    json: {\n      lista_materiais: sqlInString,\n      total_materiais_distintos: distinctValues.length,\n      linhas_sem_coluna_reconhecida: linhasSemColunaReconhecida,\n    },\n  },\n];\n"
+      }
+    },
+    {
+      "id": "5e869a16-eade-49ec-a136-97110ca76773",
+      "name": "Fleet_percent",
+      "type": "n8n-nodes-base.microsoftSql",
+      "typeVersion": 1.1,
+      "position": [
+        -688,
+        16
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n    [Material]\n   ,[UF]\n   ,[FROTA]\n   ,[Percentual_FROTA_UF]\nFROM [DB_SMS4_PJ_FT_TOTAL_SQL].[dbo].[SALES_POTENTIAL_VW_FROTA_UF]\nWHERE material IN ({{ $json.lista_materiais }})\n",
+        "options": {}
+      },
+      "executeOnce": true,
+      "credentials": {
+        "microsoftSql": {
+          "id": "qcyj5SxNsebcYrG0",
+          "name": "Microsoft SQL account"
+        }
+      }
+    },
+    {
+      "id": "05d38936-c14b-40ea-8fde-17d81bdf2522",
+      "name": "Calcular Distribuicao do Extra",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -432,
+        16
+      ],
+      "parameters": {
+        "jsCode": "/*\n* DISTRIBUIÇÃO DO POTENCIAL EXTRA (por UF e, quando possível, por filial)\n*\n* Regra de negócio (inalterada nesta revisão):\n* 1. Processa somente quantidades positivas.\n* 2. % real = Fleet UF / Fleet nacional.\n* 3. % sobrante = 100% - soma do % real nas UFs do cliente.\n* 4. % sobrante é dividida igualmente entre as UFs do cliente (\"direcionada\",\n*    isto é: a parte do extra que NÃO tem lastro em frota real).\n* 5. Converte para inteiros pelo método dos maiores restos.\n* 6. Casos sem cadastro ou frota válida são marcados como exceção.\n* 7. Família do produto é lida do PBI_Sales_Potential e propagada.\n*\n* O que mudou nesta revisão (ver README.md da pasta sales-potential-dashboard\n* para a lista completa de bugs encontrados):\n*\n*  - BUG CRÍTICO (corrigido fora deste node): o node \"If1\" descartava\n*    silenciosamente todas as linhas Tipo_Registro=EXCECAO, porque só a saída\n*    TRUE do IF estava conectada. Esse node foi removido do fluxo; agora TODAS\n*    as linhas (DISTRIBUICAO + EXCECAO + RESUMO_EXECUCAO) seguem direto para\n*    \"Prepare Dashboard Payload\", que faz a separação internamente.\n*  - BUG (corrigido aqui): linhas duplicadas de venda (mesmo Cliente + mesmo\n*    Part Number aparecendo mais de uma vez em PBI_Sales_Potential) eram\n*    processadas uma vez por linha, multiplicando a quantidade extra\n*    distribuída. Agora as linhas são agrupadas por Cliente+Part Number antes\n*    de distribuir: duplicatas EXATAS (mesmo valor) são descartadas com\n*    contagem; duplicatas com valores DIFERENTES são somadas com contagem\n*    (auditável via RESUMO_EXECUCAO e via Sales_Rows_Origem em cada linha).\n*  - BUG (corrigido aqui): linhas de Customer_Branch e de Fleet_percent\n*    exatamente repetidas (mesmo cliente+UF ou mesmo material+UF, mesmos\n*    valores) eram somadas sem checagem, inflando filiais/frota. Agora\n*    duplicatas exatas são detectadas e ignoradas (contadas no resumo).\n*  - BUG (corrigido aqui): a checagem `Number.isInteger(extraQuantity)`\n*    rejeitava valores como 45.000000001 (ruído de ponto flutuante comum em\n*    exports do Excel/Power BI), jogando linhas válidas para exceção. Agora\n*    usa arredondamento tolerante (roundNearInteger).\n*  - NOVO (pedido do usuário): cada linha de distribuição agora expõe\n*    Qtd_Real_Frota_UF (parte com lastro real de frota) e Qtd_Direcionada_UF\n*    (parte \"direcionada\", sem lastro — a divisão igualitária do % sobrante).\n*    A soma das duas sempre bate exatamente com Qtd_Final_UF.\n*  - NOVO (pedido do usuário): quando a planilha Customer_Branch tiver uma\n*    coluna de identificação de filial (ver BRANCH_ID_ALIASES), a divisão é\n*    feita por filial real (linhas Tipo_Registro=DISTRIBUICAO_FILIAL). Sem\n*    essa coluna, mantém a estimativa uniforme anterior\n*    (Qtd_Base_Por_Filial/Filiais_Com_Mais_1), agora marcada explicitamente\n*    com Distribuicao_Filial_Estimada=true para não ser lida como exata.\n*\n* Configuração do Code node:\n* Mode: Run Once for All Items\n*/\n\nconst CONFIG = {\n  salesNode: 'PBI_Sales_Potential',\n  clientUfNode: 'Customer_Branch',\n  fleetNode: 'Fleet_percent',\n};\n\n// Mantenha em sincronia com PART_NUMBER_ALIASES em \"Montar Lista de Materiais\".\nconst PART_NUMBER_ALIASES = [\n  '10dígitos',\n  '10 dígitos',\n  '10 digitos',\n  '10digitos',\n  'Part Number',\n  'Part_Number',\n  'Material',\n];\n\nconst BRANCH_ID_ALIASES = [\n  'Filial',\n  'Codigo_Filial',\n  'Codigo Filial',\n  'Cod_Filial',\n  'Id_Filial',\n  'Nome_Filial',\n  'Branch',\n  'Branch_Id',\n  'Branch_Name',\n];\n\n// ============================================================\n// FUNÇÕES AUXILIARES\n// ============================================================\n\n// Construído via String.fromCharCode (em vez do literal ̀-ͯ) só\n// para evitar problemas de encoding ao editar este arquivo em ferramentas\n// que normalizam unicode; o range é idêntico (marcas diacríticas combinantes).\nconst DIACRITICS_REGEX = new RegExp(\n  '[' + String.fromCharCode(0x0300) + '-' + String.fromCharCode(0x036f) + ']',\n  'g',\n);\n\nfunction normalizeHeader(value) {\n  return String(value ?? '')\n    .normalize('NFD')\n    .replace(DIACRITICS_REGEX, '')\n    .replace(/[^a-zA-Z0-9]/g, '')\n    .toUpperCase();\n}\n\nfunction normalizeText(value) {\n  return String(value ?? '')\n    .trim()\n    .replace(/\\s+/g, ' ')\n    .toUpperCase();\n}\n\nfunction normalizePartNumber(value) {\n  return String(value ?? '')\n    .trim()\n    .replace(/\\s+/g, '')\n    .toUpperCase();\n}\n\nfunction toNumber(value) {\n  if (typeof value === 'number') {\n    return Number.isFinite(value) ? value : 0;\n  }\n\n  if (value === null || value === undefined || value === '') {\n    return 0;\n  }\n\n  let text = String(value)\n    .trim()\n    .replace(/\\s/g, '')\n    .replace(/R\\$/gi, '')\n    .replace(/%/g, '');\n\n  // Formato brasileiro: 1.234,56\n  if (text.includes('.') && text.includes(',')) {\n    text = text.replace(/\\./g, '').replace(',', '.');\n  } else if (text.includes(',')) {\n    text = text.replace(',', '.');\n  } else if (/^-?\\d{1,3}(\\.\\d{3})+$/.test(text)) {\n    // Exemplo: 1.319.993\n    text = text.replace(/\\./g, '');\n  }\n\n  const number = Number(text);\n  return Number.isFinite(number) ? number : 0;\n}\n\n// Substitui o antigo `Number.isInteger(extraQuantity)`. Excel/Power BI\n// frequentemente produzem ruído de ponto flutuante (45.000000001,\n// 44.999999998) para valores que são conceitualmente inteiros; a checagem\n// estrita anterior rejeitava esses casos válidos. Retorna null (= exceção)\n// só quando o valor está genuinamente longe de um inteiro.\nfunction roundNearInteger(value, tolerance = 1e-6) {\n  const rounded = Math.round(value);\n  return Math.abs(value - rounded) <= tolerance ? rounded : null;\n}\n\nfunction prepareRecord(json) {\n  const record = {};\n\n  for (const [key, value] of Object.entries(json ?? {})) {\n    record[normalizeHeader(key)] = value;\n  }\n\n  return record;\n}\n\nfunction getField(record, aliases, defaultValue = '') {\n  for (const alias of aliases) {\n    const key = normalizeHeader(alias);\n\n    if (\n      Object.prototype.hasOwnProperty.call(record, key) &&\n      record[key] !== null &&\n      record[key] !== undefined &&\n      record[key] !== ''\n    ) {\n      return record[key];\n    }\n  }\n\n  return defaultValue;\n}\n\n// ============================================================\n// LEITURA DOS TRÊS NÓS\n// ============================================================\n\nconst salesItems = $(CONFIG.salesNode).all();\nconst clientUfItems = $(CONFIG.clientUfNode).all();\nconst fleetItems = $(CONFIG.fleetNode).all();\n\nconst sales = salesItems.map((item) => prepareRecord(item.json));\nconst clientUf = clientUfItems.map((item) => prepareRecord(item.json));\nconst fleet = fleetItems.map((item) => prepareRecord(item.json));\n\n// ============================================================\n// MAPA: CLIENTE → UFs (branches, totalBranches, ids de filial se existirem)\n// ============================================================\n\nconst clientMap = new Map();\nconst clientUfSignatures = new Set();\nlet duplicatasExatasClienteUf = 0;\nlet linhasComIdentificacaoFilial = 0;\n\nfor (const row of clientUf) {\n  const client = normalizeText(getField(row, ['cliente', 'CLIENTE']));\n  const uf = normalizeText(getField(row, ['UF']));\n  const branchIdRaw = String(getField(row, BRANCH_ID_ALIASES, '')).trim();\n  const branches = toNumber(getField(row, ['filiais', 'FILIAIS']));\n  const totalBranches = toNumber(getField(row, ['total_filiais_cliente', 'TOTAL FILIAIS CLIENTE']));\n\n  if (!client || !uf || branches <= 0) {\n    continue;\n  }\n\n  // Duplicata exata: mesma assinatura já vista. Quando existe id de filial,\n  // a assinatura inclui o id (então só é duplicata se o MESMO id repetir).\n  // Quando não existe id, a assinatura é o conteúdo inteiro da linha — esta\n  // planilha é pré-agregada por Cliente+UF, então uma repetição idêntica só\n  // pode ser um artefato de exportação, nunca um segundo lote legítimo.\n  const signature = `${client}|${uf}|${branchIdRaw}|${branches}|${totalBranches}`;\n  if (clientUfSignatures.has(signature)) {\n    duplicatasExatasClienteUf++;\n    continue;\n  }\n  clientUfSignatures.add(signature);\n\n  if (branchIdRaw) linhasComIdentificacaoFilial++;\n\n  if (!clientMap.has(client)) {\n    clientMap.set(client, new Map());\n  }\n\n  const ufMap = clientMap.get(client);\n\n  const current = ufMap.get(uf) ?? {\n    uf,\n    branches: 0,\n    totalBranches: 0,\n    branchIds: [],\n  };\n\n  current.branches += branches;\n  current.totalBranches = Math.max(current.totalBranches, totalBranches);\n  if (branchIdRaw && !current.branchIds.includes(branchIdRaw)) {\n    current.branchIds.push(branchIdRaw);\n  }\n\n  ufMap.set(uf, current);\n}\n\n// ============================================================\n// MAPAS DE FROTA (com dedupe de linhas exatamente repetidas)\n// ============================================================\n\nconst nationalFleetMap = new Map();\nconst fleetByPartUf = new Map();\nconst fleetSignatures = new Set();\nlet duplicatasExatasFrota = 0;\n\nfor (const row of fleet) {\n  const partNumber = normalizePartNumber(getField(row, PART_NUMBER_ALIASES));\n  const uf = normalizeText(getField(row, ['UF']));\n  const fleetQuantity = toNumber(getField(row, ['FROTA', 'Fleet']));\n\n  if (!partNumber || !uf) {\n    continue;\n  }\n\n  // A view já deveria trazer 1 linha por Material+UF; uma repetição exata\n  // (mesmo material, mesma UF, mesma frota) é um artefato de join, não uma\n  // segunda frota legítima.\n  const signature = `${partNumber}|${uf}|${fleetQuantity}`;\n  if (fleetSignatures.has(signature)) {\n    duplicatasExatasFrota++;\n    continue;\n  }\n  fleetSignatures.add(signature);\n\n  nationalFleetMap.set(partNumber, (nationalFleetMap.get(partNumber) ?? 0) + fleetQuantity);\n\n  const key = `${partNumber}|${uf}`;\n  fleetByPartUf.set(key, (fleetByPartUf.get(key) ?? 0) + fleetQuantity);\n}\n\n// ============================================================\n// AGRUPAMENTO DAS LINHAS DE VENDA (Cliente + Part Number)\n//\n// FIX: antes cada linha de PBI_Sales_Potential era distribuída\n// independentemente. Se a planilha tivesse duas linhas para o mesmo\n// Cliente+Part Number (comum em exports do Power BI), o extra era\n// distribuído em dobro. Agora agrupamos primeiro.\n// ============================================================\n\nconst salesGroups = new Map();\nlet linhasVendaIgnoradasNaoPositivas = 0;\nlet linhasUsandoAliasAmbiguoS = 0;\n\nfor (let index = 0; index < sales.length; index++) {\n  const row = sales[index];\n  const salesRow = index + 2; // cabeçalho do Excel ocupa a linha 1\n\n  const clienteOriginal = String(getField(row, ['CLIENTE', 'Cliente'])).trim();\n  const clientKey = normalizeText(clienteOriginal);\n  const partNumber = normalizePartNumber(getField(row, PART_NUMBER_ALIASES));\n\n  const familia = String(\n    getField(row, [\n      'Família',\n      'FAMILIA',\n      'Familia',\n      'Family',\n      'Familia Produto',\n      'Familia do Produto',\n      'Product Family',\n    ]),\n  ).trim();\n\n  // 'S' é um alias herdado (provável nome de coluna truncado numa versão\n  // antiga da planilha). Mantido por compatibilidade, mas cada uso é\n  // contado no resumo para que fique visível se está pegando a coluna certa.\n  const quantityAliases = [\n    'POTENCIAL QTD EXTRA CLIENTE',\n    'POTENCIAL_QTD_EXTRA_CLIENTE',\n    'Qtd Extra Cliente',\n  ];\n  let extraQuantityRaw = getField(row, quantityAliases, undefined);\n  if (extraQuantityRaw === undefined) {\n    const fallback = getField(row, ['S'], undefined);\n    if (fallback !== undefined) {\n      linhasUsandoAliasAmbiguoS++;\n      extraQuantityRaw = fallback;\n    }\n  }\n\n  const extraQuantity = toNumber(extraQuantityRaw);\n\n  // Regra 1: somente valores positivos (aplicada por linha, antes de agrupar).\n  if (extraQuantity <= 0) {\n    linhasVendaIgnoradasNaoPositivas++;\n    continue;\n  }\n\n  const groupKey = `${clientKey}|${partNumber}`;\n  const group = salesGroups.get(groupKey) ?? {\n    clienteOriginal: clienteOriginal || '(vazio)',\n    clientKey,\n    partNumber,\n    familia,\n    sourceRows: [],\n  };\n  if (!group.familia && familia) group.familia = familia;\n  group.sourceRows.push({ salesRow, extraQuantity, familia });\n  salesGroups.set(groupKey, group);\n}\n\nlet linhasVendaDuplicatasExatas = 0;\nlet linhasVendaAgregadas = 0;\n\nconst salesToProcess = [];\nfor (const group of salesGroups.values()) {\n  if (group.sourceRows.length === 1) {\n    salesToProcess.push({\n      clienteOriginal: group.clienteOriginal,\n      clientKey: group.clientKey,\n      partNumber: group.partNumber,\n      familia: group.familia,\n      extraQuantity: group.sourceRows[0].extraQuantity,\n      salesRowsOrigem: [group.sourceRows[0].salesRow],\n      linhasFonte: 1,\n    });\n    continue;\n  }\n\n  const valores = new Set(group.sourceRows.map((r) => r.extraQuantity));\n  const isExactDuplicate = valores.size === 1;\n\n  if (isExactDuplicate) {\n    linhasVendaDuplicatasExatas += group.sourceRows.length - 1;\n    salesToProcess.push({\n      clienteOriginal: group.clienteOriginal,\n      clientKey: group.clientKey,\n      partNumber: group.partNumber,\n      familia: group.familia,\n      extraQuantity: group.sourceRows[0].extraQuantity,\n      salesRowsOrigem: group.sourceRows.map((r) => r.salesRow),\n      linhasFonte: group.sourceRows.length,\n    });\n  } else {\n    linhasVendaAgregadas += group.sourceRows.length;\n    const somaExtra = group.sourceRows.reduce((acc, r) => acc + r.extraQuantity, 0);\n    salesToProcess.push({\n      clienteOriginal: group.clienteOriginal,\n      clientKey: group.clientKey,\n      partNumber: group.partNumber,\n      familia: group.familia,\n      extraQuantity: somaExtra,\n      salesRowsOrigem: group.sourceRows.map((r) => r.salesRow),\n      linhasFonte: group.sourceRows.length,\n    });\n  }\n}\n\n// ============================================================\n// PROCESSAMENTO / DISTRIBUIÇÃO\n// ============================================================\n\nconst distribution = [];\nconst distributionFilial = [];\nconst exceptions = [];\n\nlet positiveRecords = 0;\nlet positiveQuantity = 0;\nlet distributedRecords = 0;\nlet distributedQuantity = 0;\n\nfor (const item of salesToProcess) {\n  const { clienteOriginal, clientKey, partNumber, familia, extraQuantity, salesRowsOrigem, linhasFonte } = item;\n\n  positiveRecords++;\n  positiveQuantity += extraQuantity;\n\n  function addException(reason, additional = {}) {\n    exceptions.push({\n      json: {\n        Tipo_Registro: 'EXCECAO',\n        Sales_Rows_Origem: salesRowsOrigem.join(','),\n        Linhas_Fonte: linhasFonte,\n        Cliente: clienteOriginal,\n        Part_Number: partNumber,\n        Familia: familia,\n        Qtd_Extra_Cliente: extraQuantity,\n        Motivo: reason,\n        Fleet_Nacional: additional.nationalFleet ?? 0,\n        Fleet_UFs_Cliente: additional.clientFleet ?? 0,\n        Qtd_UFs_Cliente: additional.ufCount ?? 0,\n        Status: 'NÃO DISTRIBUÍDO',\n      },\n    });\n  }\n\n  if (!clientKey) {\n    addException('Cliente vazio');\n    continue;\n  }\n\n  if (!partNumber) {\n    addException('Part Number vazio');\n    continue;\n  }\n\n  const extraQuantityInt = roundNearInteger(extraQuantity);\n  if (extraQuantityInt === null) {\n    addException(`Quantidade extra não é um inteiro (${extraQuantity})`);\n    continue;\n  }\n\n  const clientUfMap = clientMap.get(clientKey);\n\n  if (!clientUfMap || clientUfMap.size === 0) {\n    addException('Cliente sem cadastro de filiais por UF');\n    continue;\n  }\n\n  const clientUfs = Array.from(clientUfMap.values())\n    .map((entry) => ({ ...entry, branchIds: [...entry.branchIds] }))\n    .sort((a, b) => a.uf.localeCompare(b.uf));\n\n  const nationalFleet = nationalFleetMap.get(partNumber) ?? 0;\n\n  if (nationalFleet <= 0) {\n    addException('Part Number sem frota nacional', { ufCount: clientUfs.length });\n    continue;\n  }\n\n  let clientFleet = 0;\n\n  for (const ufEntry of clientUfs) {\n    ufEntry.fleetUf = fleetByPartUf.get(`${partNumber}|${ufEntry.uf}`) ?? 0;\n    clientFleet += ufEntry.fleetUf;\n  }\n\n  // Regra 4: não distribuir sem frota nas UFs do cliente.\n  if (clientFleet <= 0) {\n    addException('Sem frota nas UFs onde o cliente possui filial', {\n      nationalFleet,\n      clientFleet,\n      ufCount: clientUfs.length,\n    });\n    continue;\n  }\n\n  const realPercentageSum = clientFleet / nationalFleet;\n  const leftoverPercentage = Math.max(0, 1 - realPercentageSum);\n  const equalPercentage = leftoverPercentage / clientUfs.length;\n\n  let baseQuantityTotal = 0;\n\n  for (const ufEntry of clientUfs) {\n    ufEntry.realPercentage = ufEntry.fleetUf / nationalFleet;\n    ufEntry.finalPercentage = ufEntry.realPercentage + equalPercentage;\n    ufEntry.exactQuota = extraQuantityInt * ufEntry.finalPercentage;\n    ufEntry.baseQuantity = Math.floor(ufEntry.exactQuota + 1e-12);\n    ufEntry.decimalRemainder = ufEntry.exactQuota - ufEntry.baseQuantity;\n    baseQuantityTotal += ufEntry.baseQuantity;\n  }\n\n  const remainingQuantity = extraQuantityInt - baseQuantityTotal;\n\n  const ranking = [...clientUfs].sort((a, b) => {\n    const remainderDifference = b.decimalRemainder - a.decimalRemainder;\n    if (Math.abs(remainderDifference) > 1e-12) return remainderDifference;\n    if (b.fleetUf !== a.fleetUf) return b.fleetUf - a.fleetUf;\n    return a.uf.localeCompare(b.uf);\n  });\n\n  ranking.forEach((ufEntry, rankingIndex) => {\n    ufEntry.remainderRank = rankingIndex + 1;\n    ufEntry.remainderBonus = rankingIndex < remainingQuantity ? 1 : 0;\n  });\n\n  let validationTotal = 0;\n\n  for (const ufEntry of clientUfs) {\n    const finalUfQuantity = ufEntry.baseQuantity + ufEntry.remainderBonus;\n    validationTotal += finalUfQuantity;\n\n    // NOVO: quebra Qtd_Final_UF em \"real\" (lastro de frota) vs \"direcionada\"\n    // (sem lastro — vem só da redistribuição igualitária do % sobrante).\n    // Derivado proporcionalmente do valor final já validado, com um único\n    // arredondamento para o mais próximo, garantindo\n    // Qtd_Real_Frota_UF + Qtd_Direcionada_UF === Qtd_Final_UF sempre.\n    let qtdRealFrotaUf = 0;\n    if (finalUfQuantity > 0 && ufEntry.finalPercentage > 0) {\n      const realShareExact = finalUfQuantity * (ufEntry.realPercentage / ufEntry.finalPercentage);\n      qtdRealFrotaUf = Math.min(finalUfQuantity, Math.round(realShareExact));\n    }\n    const qtdDirecionadaUf = finalUfQuantity - qtdRealFrotaUf;\n\n    const basePerBranch = Math.floor(finalUfQuantity / ufEntry.branches);\n    const branchesWithOneMore = finalUfQuantity % ufEntry.branches;\n    const temIdentificacaoFilial = ufEntry.branchIds.length > 0;\n\n    distribution.push({\n      json: {\n        Tipo_Registro: 'DISTRIBUICAO',\n        Sales_Rows_Origem: salesRowsOrigem.join(','),\n        Linhas_Fonte: linhasFonte,\n        Cliente: clienteOriginal,\n        Part_Number: partNumber,\n        Familia: familia,\n        Qtd_Extra_Cliente: extraQuantityInt,\n        UF: ufEntry.uf,\n        Filiais_UF: ufEntry.branches,\n        Total_Filiais_Cliente: ufEntry.totalBranches,\n        Fleet_UF: ufEntry.fleetUf,\n        Fleet_UFs_Cliente: clientFleet,\n        Fleet_Nacional: nationalFleet,\n        Pct_Real_Fleet: ufEntry.realPercentage,\n        Pct_Sobrante_Nacional: leftoverPercentage,\n        Pct_Redistribuida_Igual: equalPercentage,\n        Pct_Final: ufEntry.finalPercentage,\n        Cota_Exata_UF: ufEntry.exactQuota,\n        Qtd_Base_UF: ufEntry.baseQuantity,\n        Resto_Decimal: ufEntry.decimalRemainder,\n        Ordem_Maior_Resto: ufEntry.remainderRank,\n        Bonus_Resto: ufEntry.remainderBonus,\n        Qtd_Final_UF: finalUfQuantity,\n        Qtd_Real_Frota_UF: qtdRealFrotaUf,\n        Qtd_Direcionada_UF: qtdDirecionadaUf,\n        Qtd_Base_Por_Filial: basePerBranch,\n        Filiais_Com_Mais_1: branchesWithOneMore,\n        Distribuicao_Filial_Estimada: !temIdentificacaoFilial,\n        Status: 'DISTRIBUÍDO',\n      },\n    });\n\n    // Divisão por filial real, só quando a planilha tem identificação de\n    // filial para este Cliente+UF (ver BRANCH_ID_ALIASES).\n    if (temIdentificacaoFilial) {\n      const branchIds = [...ufEntry.branchIds].sort((a, b) => a.localeCompare(b));\n      const perBranchBase = Math.floor(finalUfQuantity / branchIds.length);\n      let perBranchRemainder = finalUfQuantity - perBranchBase * branchIds.length;\n\n      branchIds.forEach((branchId, branchIndex) => {\n        const bonus = branchIndex < perBranchRemainder ? 1 : 0;\n        distributionFilial.push({\n          json: {\n            Tipo_Registro: 'DISTRIBUICAO_FILIAL',\n            Cliente: clienteOriginal,\n            Part_Number: partNumber,\n            Familia: familia,\n            UF: ufEntry.uf,\n            Filial: branchId,\n            Qtd_Final_Filial: perBranchBase + bonus,\n          },\n        });\n      });\n    }\n  }\n\n  if (validationTotal !== extraQuantityInt) {\n    throw new Error(\n      `Falha na preservação do total nas linhas ${salesRowsOrigem.join(',')}: ` +\n        `${validationTotal} distribuído, esperado ${extraQuantityInt}.`,\n    );\n  }\n\n  distributedRecords++;\n  distributedQuantity += validationTotal;\n}\n\n// ============================================================\n// RESUMO DA EXECUÇÃO — antes só ia para console.log (invisível no\n// dashboard); agora também vira uma linha no resultado, para que o\n// \"Prepare Dashboard Payload\" consiga expor essas métricas na UI.\n// ============================================================\n\nconst resumo = {\n  json: {\n    Tipo_Registro: 'RESUMO_EXECUCAO',\n    linhasVendaRecebidas: sales.length,\n    linhasVendaIgnoradasNaoPositivas,\n    linhasVendaUsandoAliasAmbiguoS: linhasUsandoAliasAmbiguoS,\n    gruposClientePartNumber: salesGroups.size,\n    linhasVendaDuplicatasExatasRemovidas: linhasVendaDuplicatasExatas,\n    linhasVendaAgregadasPorDuplicidade: linhasVendaAgregadas,\n    clientesUfRecebidos: clientUf.length,\n    clientesUfDuplicatasExatasRemovidas: duplicatasExatasClienteUf,\n    linhasComIdentificacaoFilial,\n    linhasFleetRecebidas: fleet.length,\n    fleetDuplicatasExatasRemovidas: duplicatasExatasFrota,\n    registrosPositivos: positiveRecords,\n    quantidadePositiva: positiveQuantity,\n    registrosDistribuidos: distributedRecords,\n    quantidadeDistribuida: distributedQuantity,\n    registrosExcecao: exceptions.length,\n    quantidadeNaoDistribuida: positiveQuantity - distributedQuantity,\n    linhasDistribuicaoUf: distribution.length,\n    linhasDistribuicaoFilial: distributionFilial.length,\n    geradoEm: new Date().toISOString(),\n  },\n};\n\nconsole.log(resumo.json);\n\nreturn [...distribution, ...distributionFilial, ...exceptions, resumo];\n"
+      }
+    },
+    {
+      "id": "3b23005b-e54b-4837-a34f-a1608bd0f3cb",
+      "name": "Prepare Dashboard Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -208,
+        16
+      ],
+      "parameters": {
+        "jsCode": "// Agrega o resultado de \"Calcular Distribuicao do Extra\" em um único payload\n// para alimentar o dashboard React via Respond to Webhook.\n//\n// FIX (revisão): este node antes recebia só as linhas Tipo_Registro=\n// DISTRIBUICAO que sobreviviam ao node \"If1\" — e a saída FALSE do IF (todas\n// as EXCECAO) nunca estava conectada a nada, então todo erro de distribuição\n// desaparecia sem deixar rastro. O node \"If1\" foi removido do fluxo: agora\n// este node recebe TODAS as linhas diretamente de \"Calcular Distribuicao do\n// Extra\" (DISTRIBUICAO + DISTRIBUICAO_FILIAL + EXCECAO + RESUMO_EXECUCAO) e\n// faz a separação aqui, então nada é descartado silenciosamente.\nconst items = $input.all();\nconst linhasBrutas = items.map((item) => item.json);\n\nconst linhas = linhasBrutas.filter((l) => l.Tipo_Registro === 'DISTRIBUICAO');\nconst linhasFilial = linhasBrutas.filter((l) => l.Tipo_Registro === 'DISTRIBUICAO_FILIAL');\nconst excecoes = linhasBrutas.filter((l) => l.Tipo_Registro === 'EXCECAO');\nconst resumoExecucao = linhasBrutas.find((l) => l.Tipo_Registro === 'RESUMO_EXECUCAO') ?? null;\n\nfunction uniqueSorted(values) {\n  return [\n    ...new Set(\n      values.map((v) => (v === null || v === undefined ? '' : String(v).trim())).filter((v) => v !== ''),\n    ),\n  ].sort((a, b) => a.localeCompare(b, 'pt-BR'));\n}\n\nconst totaisPorUf = {};\n// NOVO: mesma quebra real (com lastro de frota) vs direcionada (sem lastro,\n// redistribuição igualitária do % sobrante) — pedida para o dashboard —\n// agora agregada por UF e no total geral.\nconst totaisRealVsDirecionadoPorUf = {};\nlet totalRealFrota = 0;\nlet totalDirecionada = 0;\n\nfor (const linha of linhas) {\n  if (!linha.UF) continue;\n  totaisPorUf[linha.UF] = (totaisPorUf[linha.UF] || 0) + (linha.Qtd_Final_UF || 0);\n\n  const bucket = totaisRealVsDirecionadoPorUf[linha.UF] || { real: 0, direcionada: 0 };\n  bucket.real += linha.Qtd_Real_Frota_UF || 0;\n  bucket.direcionada += linha.Qtd_Direcionada_UF || 0;\n  totaisRealVsDirecionadoPorUf[linha.UF] = bucket;\n\n  totalRealFrota += linha.Qtd_Real_Frota_UF || 0;\n  totalDirecionada += linha.Qtd_Direcionada_UF || 0;\n}\n\n// NOVO: \"peças por filial por cliente\" — agrega as linhas por Cliente, para\n// o painel dedicado no dashboard. Usa DISTRIBUICAO_FILIAL (dado real) quando\n// existe; cai para a estimativa uniforme (Qtd_Base_Por_Filial /\n// Filiais_Com_Mais_1) da própria linha UF quando não existe identificação de\n// filial na planilha de origem.\nconst porClienteUfMap = new Map();\nfor (const linha of linhas) {\n  const key = `${linha.Cliente}|${linha.UF}`;\n  if (!porClienteUfMap.has(key)) {\n    porClienteUfMap.set(key, {\n      cliente: linha.Cliente,\n      uf: linha.UF,\n      filiaisUf: linha.Filiais_UF,\n      qtdFinalUf: 0,\n      qtdBasePorFilialEstimada: linha.Qtd_Base_Por_Filial,\n      filiaisComMais1Estimado: linha.Filiais_Com_Mais_1,\n      estimada: linha.Distribuicao_Filial_Estimada,\n      filiais: [],\n    });\n  }\n  porClienteUfMap.get(key).qtdFinalUf += linha.Qtd_Final_UF || 0;\n}\nfor (const linha of linhasFilial) {\n  const key = `${linha.Cliente}|${linha.UF}`;\n  const entry = porClienteUfMap.get(key);\n  if (entry) {\n    entry.filiais.push({ filial: linha.Filial, qtdFinalFilial: linha.Qtd_Final_Filial });\n  }\n}\nconst distribuicaoPorFilial = [...porClienteUfMap.values()].sort(\n  (a, b) => a.cliente.localeCompare(b.cliente, 'pt-BR') || a.uf.localeCompare(b.uf, 'pt-BR'),\n);\n\nreturn [\n  {\n    json: {\n      geradoEm: new Date().toISOString(),\n      totalLinhas: linhas.length,\n      filtros: {\n        ufs: uniqueSorted(linhas.map((l) => l.UF)),\n        clientes: uniqueSorted(linhas.map((l) => l.Cliente)),\n        partNumbers: uniqueSorted(linhas.map((l) => l.Part_Number)),\n        familias: uniqueSorted(linhas.map((l) => l.Familia)),\n      },\n      totaisPorUf,\n      totaisRealVsDirecionadoPorUf,\n      totalRealVsDirecionado: { real: totalRealFrota, direcionada: totalDirecionada },\n      linhas,\n      distribuicaoPorFilial,\n      excecoes,\n      resumoExecucao,\n    },\n  },\n];\n"
+      }
+    },
+    {
+      "id": "4dca7837-866a-46d4-a761-39bf72f51d5e",
+      "name": "Save Dashboard Cache",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        16,
+        16
+      ],
+      "parameters": {
+        "jsCode": "// Guarda o último payload calculado por este pipeline (disparado por \"When\n// Executed by Another Workflow\") no armazenamento estático do workflow, para\n// o webhook do dashboard responder na hora, sem reprocessar SharePoint/SQL\n// a cada chamada.\nconst items = $input.all();\nconst payload = items[0] ? items[0].json : null;\n\nconst staticData = $getWorkflowStaticData('global');\nstaticData.dashboardPayload = payload;\nstaticData.dashboardUpdatedAt = new Date().toISOString();\n\nreturn items;\n"
+      }
+    }
+  ],
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Baixar UFxCustomer.xlsx",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Baixar UFxCustomer.xlsx": {
+      "main": [
+        [
+          {
+            "node": "Customer_Branch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Customer_Branch": {
+      "main": [
+        [
+          {
+            "node": "Baixar PBI_Sales_Potential.xlsx",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Baixar PBI_Sales_Potential.xlsx": {
+      "main": [
+        [
+          {
+            "node": "PBI_Sales_Potential",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PBI_Sales_Potential": {
+      "main": [
+        [
+          {
+            "node": "Montar Lista de Materiais",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar Lista de Materiais": {
+      "main": [
+        [
+          {
+            "node": "Fleet_percent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fleet_percent": {
+      "main": [
+        [
+          {
+            "node": "Calcular Distribuicao do Extra",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calcular Distribuicao do Extra": {
+      "main": [
+        [
+          {
+            "node": "Prepare Dashboard Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Dashboard Payload": {
+      "main": [
+        [
+          {
+            "node": "Save Dashboard Cache",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Dashboard Cache": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "0f8f736fb3e0a4ecf7c21159c69dcdbb6e749369983d6828280e2610856c2681"
+  }
+}
