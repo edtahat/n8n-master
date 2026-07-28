@@ -68,6 +68,46 @@ faz UPSERT e o webhook faz SELECT. Não implementei essa variante porque
 não sei se a credencial SQL configurada tem permissão de escrita/DDL nessa
 base — é só avisar que se precisarem dela eu faço.
 
+### 0.1. Mesmo com os dois num workflow só: testar com "Execute workflow" no editor NUNCA preenche o cache
+
+Esse é o motivo mais provável de o dashboard continuar vazio mesmo depois do
+fix acima. É um comportamento pouco divulgado do próprio n8n, confirmado no
+código-fonte (`packages/cli/src/execution-lifecycle/execution-lifecycle-hooks.ts`,
+funções `hookFunctionsSave`/`hookFunctionsSaveWorker`):
+
+```ts
+const isManualMode = this.mode === 'manual';
+if (!isManualMode && isWorkflowIdValid(this.workflowData.id) && newStaticData) {
+  // só salva se NÃO for execução manual
+  await workflowStaticDataService.saveStaticDataById(this.workflowData.id, newStaticData);
+}
+```
+
+Clicar **"Execute workflow"** (▶) no editor do n8n roda em modo `manual`. A
+execução parece funcionar normalmente — os dados passam pelos nodes, você vê
+o resultado em cada um — mas as mudanças em `$getWorkflowStaticData` são
+**descartadas no final da execução, nunca gravadas no banco**. Isso vale
+tanto pra testar o node `When Executed by Another Workflow` quanto qualquer
+outro trigger clicado manualmente no canvas.
+
+**Correção:** adicionei um segundo trigger só pro ramo do pipeline —
+`Atualizar Dashboard (Agenda)` (Schedule Trigger, 1x por hora por padrão,
+ajustável no node). Execuções disparadas pela agenda (ou por um workflow pai
+de verdade chamando via "Execute Workflow") **não** são modo `manual`, então
+persistem o cache normalmente. Os dois triggers (`When Executed by Another
+Workflow` e `Atualizar Dashboard (Agenda)`) convergem pro mesmo primeiro node
+real (`Baixar UFxCustomer.xlsx`) — qualquer um dos dois dispara o pipeline
+inteiro.
+
+**Isso só funciona com o workflow ativado** (toggle "Active" no canto
+superior direito do editor) — igual já valia pro webhook. Uma agenda de 1x
+por hora não ajuda a testar *agora*; pra confirmar rápido que o fix
+funcionou, edite temporariamente o node `Atualizar Dashboard (Agenda)` pra
+"Seconds" com um intervalo curto (ex. 30s), ative o workflow, espere um
+ciclo, confira o dashboard, e depois volte o intervalo pro valor de produção
+que fizer sentido pra vocês (1h é só um ponto de partida — se a planilha do
+SharePoint só muda uma vez por dia, uma vez por dia já bastaria).
+
 ### 1. Exceções descartadas silenciosamente (o bug mais provável por trás de "erros que eu não consigo ver")
 
 O node `If1` filtrava `Tipo_Registro == DISTRIBUICAO`, mas só a saída
@@ -280,26 +320,39 @@ triggers (pipeline e webhook) vêm juntos no mesmo arquivo.
 
 ## Como importar no n8n
 
-1. Importe `sales-potential-workflow.json` — um workflow só, com os dois
-   ramos (pipeline em cima, webhook embaixo no canvas).
-2. Confira/recrie as credenciais `Microsoft SharePoint` e `Microsoft SQL
+1. Apague os workflows separados de uma tentativa anterior, se houver
+   (pipeline e webhook como arquivos distintos) — eles não funcionam, ver
+   Bug 0.
+2. Importe `sales-potential-workflow.json` — um workflow só, com três
+   triggers no canvas: `When Executed by Another Workflow` e `Atualizar
+   Dashboard (Agenda)` em cima (convergem pro mesmo pipeline), `Webhook -
+   Dashboard Data` embaixo.
+3. Confira/recrie as credenciais `Microsoft SharePoint` e `Microsoft SQL
    account` nos nodes do ramo de cima (os IDs de credencial do workflow
    original foram mantidos, mas credenciais não viajam no export — se a
    instância for diferente, é preciso reselecionar).
-3. No node `Webhook - Dashboard Data` (ramo de baixo), configure a
-   credencial Header Auth (ver item 7 do bug list acima) antes de ativar.
-4. **Ative o workflow.** Isso é importante: o node webhook só escuta na URL
-   de produção (`/webhook/...`, sem `-test`) quando o workflow está ativo;
-   a URL `/webhook-test/...` (a que aparece no painel de teste do editor)
-   só funciona por uma execução, depois de clicar "Listen for test event" —
-   não fica no ar continuamente. Se o print de vocês veio de
-   `/webhook-test/...`, é possível que o teste tenha expirado antes de
-   vocês rodarem o pipeline; com o workflow ativo, usem a URL sem `-test`.
-5. Rode o ramo `When Executed by Another Workflow` pelo menos uma vez (ele
-   que popula o `staticData` que o ramo do webhook lê) — manualmente pelo
-   editor (▶ no node) ou chamando este workflow a partir do workflow "pai"
-   que originalmente disparava o "Sales Potential v4.2".
-6. Acesse a URL do webhook com o header configurado.
+4. No node `Webhook - Dashboard Data`, configure a credencial Header Auth
+   (ver item 7 do bug list acima) antes de ativar.
+5. **(Opcional, só pra confirmar rápido que está tudo funcionando)** No node
+   `Atualizar Dashboard (Agenda)`, troque o intervalo pra "Seconds" / 30s
+   temporariamente — assim não precisa esperar 1h pra ver o primeiro
+   resultado.
+6. **Ative o workflow** (toggle "Active", canto superior direito). Isso é
+   necessário pelos dois motivos abaixo, não só um:
+   - o node webhook só escuta na URL de **produção** (`/webhook/...`, sem
+     `-test`) quando ativo — `/webhook-test/...` só funciona por uma
+     execução após clicar "Listen for test event" no editor, não fica no
+     ar continuamente (se o print de vocês veio de `/webhook-test/...`, é
+     por isso);
+   - **e**, mais importante: só execuções não-manuais (agenda, webhook,
+     workflow pai) persistem `$getWorkflowStaticData` de volta no banco —
+     clicar "Execute workflow" no editor para testar **nunca** preenche o
+     cache, mesmo que pareça ter rodado com sucesso (ver Bug 0.1).
+7. Espere um ciclo da agenda (30s se você mudou no passo 5, senão até 1h) e
+   confira o dashboard. Se ajustou o intervalo pra teste, volte pro valor
+   de produção depois de confirmar (ex. `1x por hora`, ou diário se a
+   planilha do SharePoint só atualiza uma vez por dia).
+8. Acesse a URL do webhook (sem `-test`) com o header configurado.
 
 ## Verificação feita
 

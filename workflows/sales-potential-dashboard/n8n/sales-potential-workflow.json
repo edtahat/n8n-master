@@ -17,7 +17,27 @@
       }
     },
     {
-      "id": "89e4f666-da27-44e3-b43b-4ce6a0dd3934",
+      "id": "0bcf71fa-b4e1-43ce-9a51-281774964290",
+      "name": "Atualizar Dashboard (Agenda)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -2016,
+        -160
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "1300cb53-7786-4f37-abca-e3d7db7133dc",
       "name": "Baixar UFxCustomer.xlsx",
       "type": "n8n-nodes-base.microsoftSharePoint",
       "typeVersion": 1,
@@ -69,7 +89,7 @@
       }
     },
     {
-      "id": "9afe60c3-f45d-4bce-9971-5b2c76be5e11",
+      "id": "3bd4b302-4531-4647-af00-c8f02182e1c0",
       "name": "Baixar PBI_Sales_Potential.xlsx",
       "type": "n8n-nodes-base.microsoftSharePoint",
       "typeVersion": 1,
@@ -371,6 +391,17 @@
     "Save Dashboard Cache": {
       "main": [
         []
+      ]
+    },
+    "Atualizar Dashboard (Agenda)": {
+      "main": [
+        [
+          {
+            "node": "Baixar UFxCustomer.xlsx",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Webhook - Dashboard Data": {

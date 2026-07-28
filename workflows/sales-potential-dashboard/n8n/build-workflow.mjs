@@ -72,6 +72,28 @@ const pipelineNodes = [
     },
   },
   {
+    // NOVO: n8n só grava $getWorkflowStaticData de volta no banco quando o
+    // modo de execução NÃO é "manual" (packages/cli/src/execution-lifecycle/
+    // execution-lifecycle-hooks.ts, hookFunctionsSave/hookFunctionsSaveWorker
+    // — `if (!isManualMode && ...)`). Clicar "Execute workflow" no editor
+    // roda em modo manual: parece funcionar (os dados passam pelos nodes
+    // normalmente), mas o cache NUNCA é persistido — o webhook continua
+    // vendo staticData vazio depois. Este trigger de agenda garante que
+    // existe uma forma de rodar o pipeline em modo não-manual sem depender
+    // de um workflow pai externo. Intervalo padrão: 1x por hora — ajuste
+    // livremente (é só um parâmetro do node no editor do n8n).
+    id: crypto.randomUUID(),
+    name: 'Atualizar Dashboard (Agenda)',
+    type: 'n8n-nodes-base.scheduleTrigger',
+    typeVersion: 1.2,
+    position: [-2016, -160],
+    parameters: {
+      rule: {
+        interval: [{ field: 'hours', hoursInterval: 1 }],
+      },
+    },
+  },
+  {
     id: crypto.randomUUID(),
     name: 'Baixar UFxCustomer.xlsx',
     type: 'n8n-nodes-base.microsoftSharePoint',
@@ -268,6 +290,15 @@ const connections = {
     'Prepare Dashboard Payload',
     'Save Dashboard Cache',
   ]),
+  // Segunda entrada independente pro mesmo corpo do pipeline — ver
+  // comentário no node "Atualizar Dashboard (Agenda)" acima. Não é um
+  // Merge: cada execução começa em UM trigger só (o que disparou); os dois
+  // simplesmente convergem pro mesmo primeiro node "de verdade".
+  ...{
+    'Atualizar Dashboard (Agenda)': {
+      main: [[{ node: 'Baixar UFxCustomer.xlsx', type: 'main', index: 0 }]],
+    },
+  },
   ...chain(['Webhook - Dashboard Data', 'Read Dashboard Cache', 'Build Dashboard HTML', 'Respond to Webhook']),
 };
 
