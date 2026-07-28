@@ -12,14 +12,19 @@ workflows/sales-potential-dashboard/
 ├── README.md                          este arquivo
 ├── n8n/
 │   ├── code-nodes/*.js                código de cada Code node, como .js de verdade
-│   ├── build-pipeline-workflow.mjs    gera sales-potential-pipeline.json
-│   ├── build-webhook-workflow.mjs     gera sales-potential-webhook.json
-│   ├── sales-potential-pipeline.json  workflow corrigido, pronto pra importar
-│   └── sales-potential-webhook.json   workflow corrigido, pronto pra importar
+│   ├── build-workflow.mjs             gera sales-potential-workflow.json
+│   └── sales-potential-workflow.json  workflow corrigido, pronto pra importar
 └── dashboard/                         app React (Vite+TS+Recharts), build único
     ├── src/...
     └── scripts/embed-into-workflow.mjs
 ```
+
+**É um workflow só** (pipeline + webhook do dashboard no mesmo arquivo, dois
+triggers independentes) — ver "Bug 0" logo abaixo pra entender por quê. Uma
+revisão anterior deste projeto tinha entregado dois arquivos separados
+(`sales-potential-pipeline.json` + `sales-potential-webhook.json`); eles
+foram removidos porque essa divisão não funciona (o cache do dashboard nunca
+era preenchido de verdade — é exatamente o "Bug 0").
 
 Os `.json` em `n8n/` **não são editados à mão** — são gerados a partir dos
 `.js` em `code-nodes/` (e, no caso do webhook, do bundle React compilado).
@@ -29,6 +34,39 @@ string JSON é a origem mais comum de workflow quebrado por escaping errado.
 Editar o `.js`, rodar o gerador, revisar o diff do `.json`.
 
 ## Bugs encontrados no fluxo original
+
+### 0. Cache do dashboard nunca era preenchido — dois workflows não compartilham `$getWorkflowStaticData`
+
+Este é o bug mais grave dos dois workflows originais, e não some com nenhuma
+correção de lógica de negócio: `Save Dashboard Cache1` (no pipeline) e `Read
+Dashboard Cache` (no webhook) estavam em **workflows n8n diferentes** — dois
+arquivos JSON separados, importados como duas entidades de workflow
+distintas. `$getWorkflowStaticData('global')` não é um key-value store da
+instância inteira; é dado gravado na coluna `staticData` da própria
+**linha, no banco do n8n, daquele workflow específico**
+(`packages/cli/src/workflows/workflow-static-data.service.ts`, método
+`saveStaticDataById(workflowId, ...)` — grava com `WHERE id = :id`, e
+`getStaticDataById(workflowId)` lê com o mesmo filtro). Rodar o pipeline
+grava no `staticData` do workflow A; o webhook lê o `staticData` do workflow
+B — nunca vê o que o pipeline gravou, **mesmo que o pipeline tenha rodado
+com sucesso**. É exatamente o sintoma "rodei o `When Executed by Another
+Workflow` e o dashboard continua em 'Nenhum dado calculado ainda'".
+
+**Correção:** os dois triggers (`When Executed by Another Workflow` e
+`Webhook - Dashboard Data`) agora vivem no **mesmo workflow**
+(`sales-potential-workflow.json`), cada um com sua própria cadeia de nodes,
+sem se conectar um ao outro no canvas — mas como são a mesma entidade de
+workflow, compartilham o mesmo `staticData`. Isso resolve o problema sem
+precisar de nenhuma infraestrutura nova (banco, arquivo compartilhado).
+
+Se por alguma razão vocês precisarem manter pipeline e webhook como
+workflows separados (ex.: dono/permissão diferente para cada um no n8n), o
+cache **precisa** virar um armazenamento externo de verdade — por exemplo
+uma tabelinha em `DB_SMS4_PJ_FT_TOTAL_SQL` (a mesma base que `Fleet_percent`
+já consulta) com uma linha `(payload_json, atualizado_em)`, que o pipeline
+faz UPSERT e o webhook faz SELECT. Não implementei essa variante porque
+não sei se a credencial SQL configurada tem permissão de escrita/DDL nessa
+base — é só avisar que se precisarem dela eu faço.
 
 ### 1. Exceções descartadas silenciosamente (o bug mais provável por trás de "erros que eu não consigo ver")
 
@@ -110,7 +148,7 @@ workflow). Removido; nada no pipeline depende de workflow inputs.
 autenticação — qualquer pessoa com a URL via nomes de clientes, part
 numbers e volumes de venda internos. Adicionado `authentication: headerAuth`
 no node. **Isso muda o comportamento**: depois de importar
-`sales-potential-webhook.json`, crie uma credencial Header Auth em
+`sales-potential-workflow.json`, crie uma credencial Header Auth em
 Credentials → New → "Header Auth" (nome sugerido: "Sales Potential
 Dashboard"), escolha um nome de header (ex. `X-Dashboard-Key`) e um valor
 secreto, e selecione essa credencial no node antes de ativar o workflow —
@@ -213,43 +251,55 @@ Abre com dados de exemplo gerados localmente (`src/mockData.ts`) — não
 precisa de n8n rodando. Botão "Usar dados de exemplo" no topo da página
 regenera esses dados a qualquer momento.
 
-### Alterar o dashboard e reimportar no n8n
+### Alterar e reimportar no n8n
+
+Editou um `code-nodes/*.js` (lógica de distribuição, cache, etc.)? Só
+precisa regenerar o workflow:
+
+```bash
+cd workflows/sales-potential-dashboard/n8n
+node build-workflow.mjs   # gera sales-potential-workflow.json
+```
+
+Editou o dashboard React (`dashboard/src/`)? Precisa buildar e embutir antes
+de regenerar o workflow:
 
 ```bash
 cd workflows/sales-potential-dashboard/dashboard
-# 1. edite src/, então:
 pnpm typecheck
 pnpm build     # gera dist/index.html (bundle único)
 pnpm embed     # gera ../n8n/code-nodes/build-dashboard-html.js
 
 cd ../n8n
-node build-webhook-workflow.mjs   # gera sales-potential-webhook.json
+node build-workflow.mjs   # gera sales-potential-workflow.json
 ```
 
-Depois é só reimportar `sales-potential-webhook.json` no n8n (Import from
-File, ou colar o JSON direto no canvas).
-
-### Alterar a lógica de distribuição e reimportar
-
-```bash
-cd workflows/sales-potential-dashboard/n8n
-# edite code-nodes/calculate-distribution.js (ou os outros .js), então:
-node build-pipeline-workflow.mjs   # gera sales-potential-pipeline.json
-```
+Nos dois casos, o passo final é reimportar `sales-potential-workflow.json`
+no n8n (Import from File, ou colar o JSON direto no canvas) — os dois
+triggers (pipeline e webhook) vêm juntos no mesmo arquivo.
 
 ## Como importar no n8n
 
-1. `sales-potential-pipeline.json` — importe, confira/recrie as credenciais
-   `Microsoft SharePoint` e `Microsoft SQL account` (os IDs de credencial do
-   workflow original foram mantidos, mas credenciais não viajam no export —
-   se a instância for diferente, é preciso reselecionar).
-2. `sales-potential-webhook.json` — importe, configure a credencial Header
-   Auth do node `Webhook - Dashboard Data` (ver item 7 acima) antes de
-   ativar.
-3. Rode `sales-potential-pipeline.json` pelo menos uma vez (ele que popula o
-   cache que o webhook lê).
-4. Acesse a URL do webhook (`/webhook/sales-potential-dashboard`) com o
-   header configurado.
+1. Importe `sales-potential-workflow.json` — um workflow só, com os dois
+   ramos (pipeline em cima, webhook embaixo no canvas).
+2. Confira/recrie as credenciais `Microsoft SharePoint` e `Microsoft SQL
+   account` nos nodes do ramo de cima (os IDs de credencial do workflow
+   original foram mantidos, mas credenciais não viajam no export — se a
+   instância for diferente, é preciso reselecionar).
+3. No node `Webhook - Dashboard Data` (ramo de baixo), configure a
+   credencial Header Auth (ver item 7 do bug list acima) antes de ativar.
+4. **Ative o workflow.** Isso é importante: o node webhook só escuta na URL
+   de produção (`/webhook/...`, sem `-test`) quando o workflow está ativo;
+   a URL `/webhook-test/...` (a que aparece no painel de teste do editor)
+   só funciona por uma execução, depois de clicar "Listen for test event" —
+   não fica no ar continuamente. Se o print de vocês veio de
+   `/webhook-test/...`, é possível que o teste tenha expirado antes de
+   vocês rodarem o pipeline; com o workflow ativo, usem a URL sem `-test`.
+5. Rode o ramo `When Executed by Another Workflow` pelo menos uma vez (ele
+   que popula o `staticData` que o ramo do webhook lê) — manualmente pelo
+   editor (▶ no node) ou chamando este workflow a partir do workflow "pai"
+   que originalmente disparava o "Sales Potential v4.2".
+6. Acesse a URL do webhook com o header configurado.
 
 ## Verificação feita
 
@@ -268,6 +318,13 @@ com um payload simulando exatamente o formato que `Prepare Dashboard
 Payload` produz (incluindo um teste deliberado de quebra de `<script>` via
 `</script><b>` num nome de cliente, confirmando que o payload é escapado
 corretamente e o React nunca interpreta esse texto como HTML).
+
+O fix do "Bug 0" (cache nunca preenchido) foi conferido direto no código-fonte
+do n8n incluído neste repositório, não só por conhecimento geral: veja
+`packages/cli/src/workflows/workflow-static-data.service.ts` —
+`getStaticDataById`/`saveStaticDataById` operam com `WHERE id = :id` sobre a
+linha do workflow no banco, confirmando que não existe nenhum
+compartilhamento entre workflows diferentes.
 
 ## Limitações conhecidas
 

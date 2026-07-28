@@ -1,13 +1,22 @@
 #!/usr/bin/env node
-// Gera sales-potential-pipeline.json a partir dos arquivos em code-nodes/.
+// Gera sales-potential-workflow.json — UM ÚNICO workflow n8n com dois
+// triggers independentes (pipeline + webhook do dashboard).
 //
-// Por quê gerar em vez de editar o JSON à mão: o código de cada Code node é
-// JavaScript de verdade (com template literals, aspas, backticks). Montar
-// isso manualmente como string dentro de um JSON é fácil de errar; usar
-// JSON.stringify() sobre um objeto normal do Node elimina esse risco de
-// escaping por completo.
+// Por quê um workflow só, e não dois (como o original e a primeira revisão
+// deste projeto): $getWorkflowStaticData('global') no n8n é isolado POR
+// WORKFLOW — é dado gravado na coluna staticData da própria entidade do
+// workflow no banco do n8n, não um key-value store da instância inteira. O
+// desenho original (pipeline grava, workflow separado do webhook lê) nunca
+// funcionou de verdade: cada workflow tem seu próprio staticData, então o
+// webhook lia sempre um cache vazio, mesmo com o pipeline rodando com
+// sucesso. Colocando os dois triggers no MESMO workflow, os dois passam a
+// compartilhar o mesmo staticData — é exatamente esse compartilhamento que
+// o "'global'" no nome do método promete, só que por workflow, não por
+// instância.
 //
-// Uso: node build-pipeline-workflow.mjs
+// Uso: node build-workflow.mjs
+// (rode dashboard/npm run build && npm run embed antes, se tiver mexido no
+// dashboard React — ver README.md)
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -16,6 +25,15 @@ import crypto from 'node:crypto';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const codeNodesDir = path.join(__dirname, 'code-nodes');
+const buildDashboardHtmlPath = path.join(codeNodesDir, 'build-dashboard-html.js');
+
+if (!fs.existsSync(buildDashboardHtmlPath)) {
+  console.error(`Não encontrado: ${buildDashboardHtmlPath}`);
+  console.error(
+    'Rode, dentro de dashboard/: "pnpm build" e depois "pnpm embed" antes de gerar este workflow.',
+  );
+  process.exit(1);
+}
 
 function readCode(filename) {
   return fs.readFileSync(path.join(codeNodesDir, filename), 'utf8');
@@ -37,7 +55,11 @@ const SHAREPOINT_CREDENTIALS = {
   microsoftSharePointOAuth2Api: { id: 'UxA1PJZPVsXu3vzh', name: 'Microsoft SharePoint' },
 };
 
-const nodes = [
+// ------------------------------------------------------------------
+// Ramo 1: pipeline (SharePoint -> SQL -> distribuição -> cache)
+// Mesmas posições/params da revisão anterior — só muda o arquivo de saída.
+// ------------------------------------------------------------------
+const pipelineNodes = [
   {
     id: 'f0739e8f-b13a-46fd-82a7-f2cc1201824a',
     name: 'When Executed by Another Workflow',
@@ -45,13 +67,6 @@ const nodes = [
     typeVersion: 1.1,
     position: [-2016, 16],
     parameters: {
-      // FIX: o input original se chamava literalmente "Sales Potential v4.2"
-      // e não era lido em nenhum lugar do fluxo — parece ter sido digitado
-      // no campo errado (provavelmente pretendia ser a versão do workflow,
-      // não um parâmetro de entrada). Nenhum node deste pipeline depende de
-      // workflow inputs, então a lista foi esvaziada. Se o workflow que
-      // chama este precisar mandar um parâmetro de verdade no futuro,
-      // declare-o aqui com um nome descritivo.
       workflowInputs: { values: [] },
       returnOutput: 'allRuns',
     },
@@ -163,34 +178,98 @@ const nodes = [
   },
 ];
 
-function chain(...names) {
+// ------------------------------------------------------------------
+// Ramo 2: webhook do dashboard (lê o cache, serve o React já compilado).
+// Mesmo workflow, trigger diferente — agora enxerga o staticData que o
+// ramo 1 grava, porque é a mesma entidade de workflow.
+// ------------------------------------------------------------------
+const webhookNodes = [
+  {
+    id: '90763a9f-5feb-49a3-97c4-fc7000bd575f',
+    name: 'Webhook - Dashboard Data',
+    type: 'n8n-nodes-base.webhook',
+    typeVersion: 2.1,
+    position: [-2016, 480],
+    webhookId: 'ea5524eb-b124-4337-afc0-3d5b3cbbd2e7',
+    parameters: {
+      path: 'sales-potential-dashboard',
+      responseMode: 'responseNode',
+      // Este endpoint expõe dados internos de vendas/frota (clientes, part
+      // numbers, volumes) — sem autenticação, qualquer pessoa com a URL via
+      // a página inteira. Antes de importar: Credentials > New > "Header
+      // Auth" (nome sugerido "Sales Potential Dashboard"), escolha um nome
+      // de header (ex.: "X-Dashboard-Key") e um valor secreto, e selecione
+      // essa credencial neste node. Sem isso configurado o node fica com a
+      // credencial pendente e o webhook não responde. Se preferir manter
+      // público (ex.: instância já atrás de VPN interna), troque
+      // "authentication" de volta para "none".
+      authentication: 'headerAuth',
+      options: {},
+    },
+    credentials: {
+      httpHeaderAuth: { id: 'PENDING_CONFIGURE_ME', name: 'Sales Potential Dashboard (configurar)' },
+    },
+  },
+  {
+    id: '63117011-b930-48e7-95e4-e40af7135d5b',
+    name: 'Read Dashboard Cache',
+    type: 'n8n-nodes-base.code',
+    typeVersion: 2,
+    position: [-1792, 480],
+    parameters: { jsCode: readCode('read-dashboard-cache.js') },
+  },
+  {
+    id: 'd5a1c806-08b6-4339-8891-90c1d21b1800',
+    name: 'Build Dashboard HTML',
+    type: 'n8n-nodes-base.code',
+    typeVersion: 2,
+    position: [-1568, 480],
+    parameters: { jsCode: readCode('build-dashboard-html.js') },
+  },
+  {
+    id: '2858ec67-25eb-40dd-8163-502e427fab58',
+    name: 'Respond to Webhook',
+    type: 'n8n-nodes-base.respondToWebhook',
+    typeVersion: 1.4,
+    position: [-1344, 480],
+    parameters: {
+      respondWith: 'text',
+      responseBody: '={{ $json.htmlContent }}',
+      options: {
+        responseHeaders: {
+          entries: [{ name: 'Content-Type', value: 'text/html; charset=utf-8' }],
+        },
+      },
+    },
+  },
+];
+
+const nodes = [...pipelineNodes, ...webhookNodes];
+
+function chain(names, { terminal = true } = {}) {
   const connections = {};
   for (let i = 0; i < names.length - 1; i++) {
     connections[names[i]] = { main: [[{ node: names[i + 1], type: 'main', index: 0 }]] };
   }
-  connections[names[names.length - 1]] = { main: [[]] };
+  if (terminal) connections[names[names.length - 1]] = { main: [[]] };
   return connections;
 }
 
-// FIX: o node "If1" (removido) só tinha a saída TRUE conectada — a saída
-// FALSE, que levaria todas as linhas Tipo_Registro=EXCECAO, nunca foi ligada
-// a nada, então todo erro de distribuição era descartado sem deixar rastro.
-// Em vez de religar as duas saídas de um IF (fácil de esquecer de novo no
-// futuro), o filtro foi removido: TODAS as linhas seguem direto para
-// "Prepare Dashboard Payload", que agora separa DISTRIBUICAO/
-// DISTRIBUICAO_FILIAL/EXCECAO/RESUMO_EXECUCAO internamente.
-const connections = chain(
-  'When Executed by Another Workflow',
-  'Baixar UFxCustomer.xlsx',
-  'Customer_Branch',
-  'Baixar PBI_Sales_Potential.xlsx',
-  'PBI_Sales_Potential',
-  'Montar Lista de Materiais',
-  'Fleet_percent',
-  'Calcular Distribuicao do Extra',
-  'Prepare Dashboard Payload',
-  'Save Dashboard Cache',
-);
+const connections = {
+  ...chain([
+    'When Executed by Another Workflow',
+    'Baixar UFxCustomer.xlsx',
+    'Customer_Branch',
+    'Baixar PBI_Sales_Potential.xlsx',
+    'PBI_Sales_Potential',
+    'Montar Lista de Materiais',
+    'Fleet_percent',
+    'Calcular Distribuicao do Extra',
+    'Prepare Dashboard Payload',
+    'Save Dashboard Cache',
+  ]),
+  ...chain(['Webhook - Dashboard Data', 'Read Dashboard Cache', 'Build Dashboard HTML', 'Respond to Webhook']),
+};
 
 const workflow = {
   nodes,
@@ -202,13 +281,15 @@ const workflow = {
   },
 };
 
-const outPath = path.join(__dirname, 'sales-potential-pipeline.json');
+const outPath = path.join(__dirname, 'sales-potential-workflow.json');
 fs.writeFileSync(outPath, JSON.stringify(workflow, null, 2) + '\n', 'utf8');
-console.log(`Escrito: ${outPath}`);
+console.log(`Escrito: ${outPath} (${(fs.statSync(outPath).size / 1024).toFixed(0)} KB)`);
 
-// Checagens estruturais básicas: todo destino de conexão precisa existir
-// como node, e todo node (exceto o último) precisa aparecer como origem.
 const nodeNames = new Set(nodes.map((n) => n.name));
+if (nodeNames.size !== nodes.length) {
+  console.error('ERRO: nomes de node duplicados entre os dois ramos.');
+  process.exit(1);
+}
 let ok = true;
 for (const [from, def] of Object.entries(connections)) {
   if (!nodeNames.has(from)) {
